@@ -1,0 +1,244 @@
+"""Parse MotionCam GPMF sensor samples and reconstruct an experimental GCSV timeline.
+
+Validated with one Vivo X100 Ultra MotionCam main-camera 4K/30 MOV.
+This is not a general GPMF decoder or a fix for dropped/variable-rate samples.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import math
+import shutil
+import struct
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+GRAVITY = 9.80665
+
+
+class RepairError(Exception):
+    """A recoverable input, decoding, or conversion error."""
+
+
+@dataclass(frozen=True)
+class SensorBatch:
+    timestamp_us: int
+    scale: int
+    samples: tuple[tuple[int, int, int], ...]
+
+
+@dataclass(frozen=True)
+class SensorData:
+    gyro: tuple[SensorBatch, ...]
+    accel: tuple[SensorBatch, ...]
+
+
+@dataclass(frozen=True)
+class RepairReport:
+    source: str
+    gyro_batches: int
+    accel_batches: int
+    samples: int
+    rate_hz: float
+    interval_us: float
+    timestamp_mismatch_max_ms: float
+    timestamp_mismatch_median_ms: float
+    output: str | None
+
+
+def gpmf_entries(data: bytes) -> Iterator[tuple[bytes, int, bytes]]:
+    """Yield (fourcc, type, payload) for bounded 4-byte-aligned GPMF records.
+
+    MotionCam may append incomplete vendor trailers. We ignore those after
+    complete entries, but reject malformed first entries.
+    """
+    i = 0
+    while i + 8 <= len(data):
+        if not any(data[i:]):
+            return
+        key = data[i : i + 4]
+        type_code = data[i + 4]
+        record_size = data[i + 5] * int.from_bytes(data[i + 6 : i + 8], "big")
+        end = i + 8 + record_size
+        if record_size <= 0 or end > len(data):
+            if i == 0:
+                raise RepairError(f"Malformed GPMF entry at byte offset {i} ({key!r})")
+            return
+        yield key, type_code, data[i + 8 : end]
+        i += 8 + ((record_size + 3) // 4) * 4
+
+
+def sensor_streams(packet: bytes) -> Iterator[dict[bytes, bytes]]:
+    if len(packet) >= 8 and packet[4:8] == b"GPMF":
+        packet = packet[8:]
+
+    def visit(node: bytes) -> Iterator[dict[bytes, bytes]]:
+        for key, typ, value in gpmf_entries(node):
+            if key == b"STRM":
+                fields = {k: v for k, _, v in gpmf_entries(value)}
+                if b"STMP" in fields and b"SCAL" in fields:
+                    yield fields
+            elif typ == 0:
+                yield from visit(value)
+
+    yield from visit(packet)
+
+
+def _run(command: list[str]) -> bytes:
+    if not shutil.which(command[0]):
+        raise RepairError(f"Required executable not found on PATH: {command[0]}")
+    try:
+        return subprocess.check_output(command, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode("utf-8", "replace")[-1200:]
+        raise RepairError(f"{command[0]} failed (exit {exc.returncode}): {detail}") from exc
+
+
+def extract_gpmd(path: Path) -> tuple[list[int], bytes]:
+    """Extract the embedded gpmd track and its packet sizes with FFmpeg."""
+    probe = json.loads(_run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)]))
+    streams = [s for s in probe.get("streams", []) if s.get("codec_tag_string") == "gpmd"]
+    if len(streams) != 1:
+        raise RepairError(f"Expected one embedded gpmd track; found {len(streams)}. Try a separate .gcv log if one exists.")
+    index = int(streams[0]["index"])
+    packets = json.loads(_run([
+        "ffprobe", "-v", "error", "-select_streams", str(index),
+        "-show_packets", "-show_entries", "packet=size", "-of", "json", str(path),
+    ]))
+    sizes = [int(p["size"]) for p in packets.get("packets", [])]
+    if not sizes or any(size <= 0 for size in sizes):
+        raise RepairError("No usable GPMF metadata packets found")
+    raw = _run(["ffmpeg", "-v", "error", "-i", str(path), "-map", f"0:{index}", "-c", "copy", "-f", "data", "-"])
+    if sum(sizes) != len(raw):
+        raise RepairError(f"GPMF packet boundaries mismatch: expected {sum(sizes)} bytes, got {len(raw)}")
+    return sizes, raw
+
+
+def parse_sensors(packet_sizes: list[int], raw: bytes) -> SensorData:
+    if sum(packet_sizes) != len(raw):
+        raise RepairError("Provided packet sizes do not match GPMF payload length")
+    tracks: dict[bytes, list[SensorBatch]] = {b"GYRO": [], b"ACCL": []}
+    offset = 0
+    for length in packet_sizes:
+        packet = raw[offset : offset + length]
+        offset += length
+        for fields in sensor_streams(packet):
+            for sensor in tracks:
+                if sensor not in fields:
+                    continue
+                blob = fields[sensor]
+                if len(blob) % 6:
+                    raise RepairError(f"Unexpected {sensor.decode()} sample format (expected signed 16-bit XYZ)")
+                scale = int.from_bytes(fields[b"SCAL"], "big", signed=True)
+                if scale <= 0:
+                    raise RepairError("Invalid GPMF sensor scale")
+                ts = int.from_bytes(fields[b"STMP"], "big", signed=False)
+                tracks[sensor].append(SensorBatch(ts, scale, tuple(struct.iter_unpack(">hhh", blob))))
+    return SensorData(tuple(tracks[b"GYRO"]), tuple(tracks[b"ACCL"]))
+
+
+def _sensor_scale(batches: tuple[SensorBatch, ...], label: str) -> int:
+    if not batches:
+        raise RepairError(f"No {label} samples in the metadata track")
+    scales = {b.scale for b in batches}
+    if len(scales) != 1:
+        raise RepairError(f"Variable {label} sensor scales are not supported")
+    return next(iter(scales))
+
+
+def analyze(source: Path, sensors: SensorData) -> RepairReport:
+    gyro, accel = sensors.gyro, sensors.accel
+    _sensor_scale(gyro, "GYRO")
+    _sensor_scale(accel, "ACCL")
+    if len(gyro) < 2:
+        raise RepairError("At least two gyro batches are needed to infer sample rate")
+    n_g = sum(len(b.samples) for b in gyro)
+    n_a = sum(len(b.samples) for b in accel)
+    if n_g != n_a:
+        raise RepairError(f"Mismatched sensor sample counts (gyro={n_g}, accel={n_a}); refusing to pair out-of-phase values")
+    last_start_index = n_g - len(gyro[-1].samples)
+    elapsed_us = gyro[-1].timestamp_us - gyro[0].timestamp_us
+    if last_start_index <= 0 or elapsed_us <= 0:
+        raise RepairError("Invalid timestamp endpoints")
+    interval_us = elapsed_us / last_start_index
+    rate_hz = 1_000_000 / interval_us
+    if not math.isfinite(rate_hz) or not 50 <= rate_hz <= 4000:
+        raise RepairError(f"Implausible gyro rate: {rate_hz:.2f} Hz")
+    deviations = []
+    cumulative = 0
+    for batch in gyro:
+        expected = gyro[0].timestamp_us + cumulative * interval_us
+        deviations.append(abs(batch.timestamp_us - expected) / 1000)
+        cumulative += len(batch.samples)
+    deviations.sort()
+    middle = len(deviations) // 2
+    median = (deviations[middle] if len(deviations) % 2 else (deviations[middle - 1] + deviations[middle]) / 2)
+    return RepairReport(
+        source=source.name, gyro_batches=len(gyro), accel_batches=len(accel),
+        samples=n_g, rate_hz=rate_hz, interval_us=interval_us,
+        timestamp_mismatch_max_ms=deviations[-1],
+        timestamp_mismatch_median_ms=median, output=None,
+    )
+
+
+def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairReport) -> None:
+    """Write the experimental X100 Ultra axes with a uniform timeline."""
+    scale_g = _sensor_scale(sensors.gyro, "GYRO")
+    scale_a = _sensor_scale(sensors.accel, "ACCL")
+    with dest.open("w", newline="", encoding="utf-8") as handle:
+        handle.write("GYROFLOW IMU LOG\n")
+        writer = csv.writer(handle, lineterminator="\n")
+        for row in [
+            ("version", "1.3"),
+            ("id", f"{source.stem}_MotionCam_retimed"),
+            ("orientation", "XYZ"),
+            ("vendor", "MotionCam"),
+            ("note", "Experimental reconstructed GPMF timestamps; axes validated for Vivo X100 Ultra MotionCam main camera"),
+            ("videofilename", source.name),
+            ("tscale", "0.000001"),
+            ("gscale", str(1.0 / scale_g)),
+            ("ascale", str(1.0 / (scale_a * GRAVITY))),
+            ("t", "gx", "gy", "gz", "ax", "ay", "az"),
+        ]:
+            writer.writerow(row)
+        first = sensors.gyro[0].timestamp_us
+        gyro_samples = (xyz for batch in sensors.gyro for xyz in batch.samples)
+        accel_samples = (xyz for batch in sensors.accel for xyz in batch.samples)
+        for idx, (g, a) in enumerate(zip(gyro_samples, accel_samples)):
+            gx, gy, gz = g
+            ax, ay, az = a
+            writer.writerow([round(first + idx * report.interval_us), -gy, -gx, -gz, -ay, -ax, -az])
+
+
+def repair(source: Path, destination: Path | None = None, *, overwrite: bool = False,
+           dry_run: bool = False) -> RepairReport:
+    if not source.is_file():
+        raise RepairError(f"File does not exist: {source}")
+    destination = destination or source.with_name(source.stem + "_retimed.gcsv")
+    if source.resolve() == destination.resolve():
+        raise RepairError("Output must differ from input")
+    if not dry_run and destination.exists() and not overwrite:
+        raise RepairError(f"Output already exists: {destination} (pass --overwrite to replace)")
+    sizes, raw = extract_gpmd(source)
+    sensors = parse_sensors(sizes, raw)
+    report = analyze(source, sensors)
+    if not dry_run:
+        if not destination.parent.is_dir():
+            raise RepairError(f"Output folder does not exist: {destination.parent}")
+        import os
+        import tempfile
+        temp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, prefix=".motioncam-", suffix=".gcsv", delete=False
+            ) as tmp:
+                temp_name = Path(tmp.name)
+            write_gcsv(source, temp_name, sensors, report)
+            os.replace(temp_name, destination)
+        finally:
+            if temp_name is not None:
+                temp_name.unlink(missing_ok=True)
+    return RepairReport(**{**report.__dict__, "output": None if dry_run else str(destination)})
