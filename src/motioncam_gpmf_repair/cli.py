@@ -18,11 +18,14 @@ def main(argv: list[str] | None = None) -> int:
     if requested and requested[0] == "prepare":
         from .prepare import main as prepare_main
         return prepare_main(requested[1:])
+    if requested and requested[0] == "project":
+        from .project import main as project_main
+        return project_main(requested[1:])
 
     parser = argparse.ArgumentParser(
         prog="motioncam-gpmf-repair",
         description="Reconstruct embedded MotionCam GPMF gyro timing for Gyroflow.",
-        epilog="Workflows: motioncam-gpmf-repair inspect VIDEO, or motioncam-gpmf-repair prepare VIDEO",
+        epilog="Workflows: motioncam-gpmf-repair inspect VIDEO | prepare VIDEO | project VIDEO",
     )
     parser.add_argument("files", nargs="+", type=Path, help="MotionCam MOV video(s) containing a gpmd data track")
     parser.add_argument("-o", "--output", type=Path, help="Output path (only valid with one input)")

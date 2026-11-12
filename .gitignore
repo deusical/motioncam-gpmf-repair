@@ -12,6 +12,7 @@
 
 # Generated preparation packages (may contain private recording metadata)
 *_prepared/
+*_review.gyroflow
 .*_prepared-stage-*/
 .*_prepared-backup-*/
 
