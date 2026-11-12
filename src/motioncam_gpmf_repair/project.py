@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -226,7 +227,15 @@ def _check_version(executable: str) -> str:
     return m[0]
 
 
-def _verify_export(project: Path, video: Path, motion: Path, *, lens_name: str | None) -> dict:
+def _verify_export(
+    project: Path, video: Path, motion: Path, *, lens_name: str | None,
+    allow_sync: bool = False,
+) -> dict:
+    """Verify Gyroflow wrote the intended sources and inspect saved offsets.
+
+    The ordinary project command deliberately rejects all sync points. Probe
+    mode accepts only well-formed finite offsets, but makes no quality claim.
+    """
     if not project.is_file() or project.stat().st_size <= 0:
         raise ProjectError("Gyroflow did not produce the requested project file")
     obj = _read_json(project)
@@ -242,15 +251,61 @@ def _verify_export(project: Path, video: Path, motion: Path, *, lens_name: str |
         raise ProjectError("Exported project has no lens calibration")
     if lens_name and lens["name"] != lens_name:
         raise ProjectError("Exported project lens profile differs from the explicit selection")
-    offsets = obj.get("offsets")
-    if offsets not in (None, {}, []):
+    raw_offsets = obj.get("offsets") or {}
+    if not isinstance(raw_offsets, dict):
+        raise ProjectError("Exported synchronization offsets are not a valid mapping")
+    if raw_offsets and not allow_sync:
         raise ProjectError("Export contains old or automatic synchronization offsets")
+    points = []
+    for stamp, offset in raw_offsets.items():
+        try:
+            stamp_us = int(stamp)
+            offset_ms = float(offset)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ProjectError("Exported synchronization point has invalid numbers") from exc
+        if stamp_us < 0 or not math.isfinite(offset_ms):
+            raise ProjectError("Exported synchronization point has non-finite/negative time")
+        points.append((stamp_us / 1_000_000.0, offset_ms))
+    points.sort()
+    if len({x[0] for x in points}) != len(points):
+        raise ProjectError("Exported synchronization point timestamps are duplicated")
     return {
         "version": obj["version"], "lens": lens["name"],
         "orientation": gyro.get("imu_orientation"),
-        "sync_point_count": 0,
+        "sync_point_count": len(points),
+        "sync_points": [{"video_time_s": round(t, 6), "offset_ms": round(v, 6)}
+                        for t, v in points],
+        "offset_span_ms": round(max(v for _, v in points) - min(v for _, v in points), 6)
+        if points else None,
+        "time_span_s": round(points[-1][0] - points[0][0], 6)
+        if points else None,
     }
 
+
+def _sync_probe_params(search_size: float, max_points: int, resolution: int) -> dict:
+    """Gyroflow v1.7 uses LENS sync_settings, not merely --sync-params.
+
+    Keep intentionally simple, deterministic and review-first. We do not
+    overwrite preexisting clip offsets or enable optical correction/render.
+    """
+    if not math.isfinite(search_size) or not 0.05 <= search_size <= 10:
+        raise ProjectError("--search-size must be between 0.05 and 10 seconds")
+    if not 1 <= max_points <= 12:
+        raise ProjectError("--max-sync-points must be between 1 and 12")
+    if resolution < 240 or resolution > 2160 or resolution % 2:
+        raise ProjectError("--sync-resolution must be an even height between 240 and 2160")
+    return {
+        "do_autosync": True,
+        "do_optical_correction": False,
+        "ignore_file_motion": False,
+        "initial_offset": 0,
+        "search_size": search_size,
+        "max_sync_points": max_points,
+        "auto_sync_points": False,
+        "every_nth_frame": 1,
+        "time_per_syncpoint": 0.5,
+        "processing_resolution": resolution,
+    }
 
 def _finalize_render_destination(project: Path, destination: Path, video: Path) -> None:
     """Re-home Gyroflow's temporary export settings before publishing.
@@ -276,8 +331,13 @@ def build_project(
     video: Path, *, reference: Path | None = None, preset: Path | None = None,
     lens_profile: Path | None = None, gyroflow: str | None = None,
     output: Path | None = None, dry_run: bool = False,
+    sync_probe: bool = False, search_size: float = 0.5,
+    max_sync_points: int = 5, sync_resolution: int = 720,
 ) -> dict:
     """Export a real Gyroflow-authored project in a temporary staging folder."""
+    probe_params = _sync_probe_params(search_size, max_sync_points, sync_resolution) if sync_probe else None
+    if not sync_probe and (search_size != 0.5 or max_sync_points != 5 or sync_resolution != 720):
+        raise ProjectError("Synchronization options require --sync-probe")
     if reference is not None and (preset is not None or lens_profile is not None):
         raise ProjectError("--reference cannot be combined with --preset or --lens-profile")
     if reference is None and preset is None and lens_profile is None:
@@ -285,11 +345,15 @@ def build_project(
     video = video.expanduser().resolve()
     selected_video, motion, manifest, inspection = _selected_files(video)
     package = video.with_name(video.stem + "_prepared")
-    destination = (output or video.with_name(video.stem + "_review.gyroflow")).expanduser().resolve()
+    suffix = "_sync_probe.gyroflow" if sync_probe else "_review.gyroflow"
+    destination = (output or video.with_name(video.stem + suffix)).expanduser().resolve()
+    report_dest = destination.with_name(destination.stem + "_report.json") if sync_probe else None
     if destination.suffix.lower() != ".gyroflow" or not destination.parent.is_dir():
         raise ProjectError("Project output must be a .gyroflow file in an existing folder")
     if destination.exists():
         raise ProjectError("Project already exists; choose a new --output (never overwrites)")
+    if report_dest is not None and report_dest.exists():
+        raise ProjectError("Sync probe report already exists; choose a new --output")
     if destination == video or destination in package.parents or package in destination.parents:
         raise ProjectError("Project output cannot modify the video or prepared package")
     if destination in (selected_video, motion):
@@ -342,6 +406,19 @@ def build_project(
         lens_data = dict(lens_data)
         lens_data.pop("sync_settings", None)
 
+    if probe_params is not None:
+        # Set the same settings in the actual lens profile and CLI sync args.
+        # Gyroflow's render queue checks lens.sync_settings.do_autosync.
+        if preset_content is None and lens_path is None:
+            raise ProjectError("Sync probe requires an explicit calibrated reference or profile")
+        if preset_content is not None:
+            lens_preset = preset_content.get("calibration_data")
+            if isinstance(lens_preset, dict):
+                lens_preset["sync_settings"] = dict(probe_params)
+            preset_content["synchronization"] = dict(probe_params)
+        if lens_path is not None:
+            lens_data["sync_settings"] = dict(probe_params)
+
     # Gyroflow can invoke optical synchronization by default. Our sync params
     # explicitly turn it OFF, while export-project 2 excludes video rendering.
     executable = _binary(gyroflow)
@@ -359,7 +436,9 @@ def build_project(
         "motion": str(motion), "output": str(destination),
         "lens": lens_name, "gyroflow_version": version,
         "source_mode": (manifest.get("motion_input") or {}).get("kind", "embedded_gpmd"),
-        "optical_sync": "not performed; review required",
+        "optical_sync": ("experimental autosync requested; results unverified"
+                         if sync_probe else "not performed; review required"),
+        "probe_report": str(report_dest) if report_dest else None,
     }
     if dry_run:
         return intended
@@ -380,7 +459,7 @@ def build_project(
             executable, str(selected_video), "--gyro-file", str(motion),
             "--export-project", "2",
             "--out-params", json.dumps({"output_path": str(staged_out)}),
-            "--sync-params", json.dumps(_NO_SYNC),
+            "--sync-params", json.dumps(probe_params if probe_params is not None else _NO_SYNC),
         ]
         if preset_path is not None:
             cmd.extend(["--preset", str(preset_path)])
@@ -394,15 +473,50 @@ def build_project(
         if run.returncode != 0:
             error = (run.stderr or run.stdout).strip()[-900:]
             raise ProjectError(f"Gyroflow project export exited {run.returncode}: {error}")
-        exported = _verify_export(staged_out, selected_video, motion, lens_name=lens_name)
+        exported = _verify_export(
+            staged_out, selected_video, motion, lens_name=lens_name,
+            allow_sync=sync_probe,
+        )
         _finalize_render_destination(staged_out, destination, selected_video)
-        # The finalizer alters only output folder/name; verify source references
-        # again so the final published project remains rooted in the right data.
-        _verify_export(staged_out, selected_video, motion, lens_name=lens_name)
-        if destination.exists():
+        # Recheck after modifying the output folder only.
+        _verify_export(staged_out, selected_video, motion, lens_name=lens_name,
+                       allow_sync=sync_probe)
+        probe_status = "offsets_present_unverified" if exported["sync_point_count"] else "no_sync_points"
+        if report_dest is not None:
+            report = {
+                "format": "motioncam-gyroflow-sync-probe",
+                "version": 1,
+                "status": probe_status,
+                "source_mode": intended["source_mode"],
+                "gyroflow_version": version,
+                "lens": lens_name,
+                "settings": probe_params,
+                "project": exported,
+                "interpretation": (
+                    "New offsets found; this does not verify physical synchronization."
+                    if exported["sync_point_count"] else
+                    "CLI completed but saved no offsets. Gyroflow may have skipped autosync "
+                    "because motion metadata claims accurate timestamps, or optical tracking "
+                    "failed. This is not evidence of successful synchronization."
+                ),
+                "review_required": True,
+            }
+            staged_report = stage / report_dest.name
+            staged_report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        if destination.exists() or (report_dest is not None and report_dest.exists()):
             raise ProjectError("Destination appeared during export; refusing to overwrite")
         os.replace(staged_out, destination)
-        return {**intended, "project": exported}
+        try:
+            if report_dest is not None:
+                os.replace(staged_report, report_dest)
+        except OSError:
+            destination.unlink(missing_ok=True)
+            raise
+        return {
+            **intended,
+            "status": probe_status if sync_probe else "created",
+            "project": exported,
+        }
     finally:
         shutil.rmtree(stage)
 
@@ -410,7 +524,7 @@ def build_project(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="motioncam-gpmf-repair project",
-        description="Export a Gyroflow project for a prepared recording, without autosync or video rendering",
+        description="Export a Gyroflow project, or experimentally probe headless autosync (never render)",
     )
     parser.add_argument("video", type=Path, help="Original MOV/MP4 with an existing _prepared package")
     calibration = parser.add_mutually_exclusive_group()
@@ -421,6 +535,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lens-profile", type=Path,
                         help="Verified Gyroflow lens JSON; may be used without a preset")
     parser.add_argument("--gyroflow", help="Path to Gyroflow.exe or command on PATH")
+    parser.add_argument("--sync-probe", action="store_true",
+                        help="EXPERIMENT: request headless Gyroflow autosync and inspect new offsets; no rendering")
+    parser.add_argument("--search-size", type=float, default=0.5,
+                        help="Probe search window in seconds (default: 0.5)")
+    parser.add_argument("--max-sync-points", type=int, default=5,
+                        help="Probe number of evenly spaced regions (default: 5)")
+    parser.add_argument("--sync-resolution", type=int, default=720,
+                        help="Probe optical processing height (default: 720)")
     parser.add_argument("-o", "--output", type=Path, help="New destination .gyroflow file")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate inputs and plan only; no Gyroflow launch or file writes")
@@ -430,6 +552,8 @@ def main(argv: list[str] | None = None) -> int:
             args.video, reference=args.reference, preset=args.preset,
             lens_profile=args.lens_profile, gyroflow=args.gyroflow,
             output=args.output, dry_run=args.dry_run,
+            sync_probe=args.sync_probe, search_size=args.search_size,
+            max_sync_points=args.max_sync_points, sync_resolution=args.sync_resolution,
         )
     except (ProjectError, OSError, TypeError, KeyError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -440,6 +564,13 @@ def main(argv: list[str] | None = None) -> int:
     print("  Lens: " + str(report["lens"]))
     print("  Output: " + report["output"])
     print("  Gyroflow: " + report["gyroflow_version"])
+    if args.sync_probe:
+        print("  Sync probe: " + report["status"])
+        if report.get("project"):
+            print(f"  Saved sync points: {report['project']['sync_point_count']}")
+            print("  Report: " + str(report["probe_report"]))
+        print("  A completed CLI call is NOT proof of correct optical synchronization.")
+        return 2 if report["status"] == "no_sync_points" else 0
     print("  Optical sync: NOT performed; review in Gyroflow before rendering")
     return 0
 
