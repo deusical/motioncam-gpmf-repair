@@ -22,6 +22,7 @@ classifiers = [
 [project.scripts]
 motioncam-gpmf-repair = "motioncam_gpmf_repair.cli:main"
 motioncam-gpmf-dump = "motioncam_gpmf_repair.diagnostics:main"
+motioncam-video-normalize = "motioncam_gpmf_repair.video:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
