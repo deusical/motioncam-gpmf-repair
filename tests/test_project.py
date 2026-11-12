@@ -110,6 +110,10 @@ class GyroflowProjectTests(unittest.TestCase):
             "gyro_source": {"filepath": self.motion.resolve().as_uri(),
                             "imu_orientation": orientation},
             "calibration_data": calibration, "offsets": {},
+            "output": {
+                "output_folder": export_path.parent.as_uri(),
+                "output_filename": export_path.name,
+            },
         }
         export_path.write_text(json.dumps(data), encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="Export completed", stderr="")
@@ -157,6 +161,10 @@ class GyroflowProjectTests(unittest.TestCase):
         self.assertEqual(result["status"], "created")
         self.assertEqual(result["project"]["lens"], "Vivo_X100 Ultra_24mm_4k")
         self.assertEqual(result["project"]["sync_point_count"], 0)
+        exported = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(exported["output"]["output_folder"], self.root.resolve().as_uri())
+        self.assertEqual(exported["output"]["output_filename"], "recording_stabilized.mp4")
+        self.assertNotIn("-project-", exported["output"]["output_folder"])
         self.assertEqual(self.source.read_bytes(), b"synthetic video")
         self.assertEqual(self.motion.read_text(encoding="utf-8"), gcsv_text())
         self.assertEqual(sorted(p.name for p in self.package.iterdir()),
@@ -195,6 +203,24 @@ class GyroflowProjectTests(unittest.TestCase):
                 build_project(self.source, lens_profile=self.lens)
         self.assertFalse((self.root / "recording_review.gyroflow").exists())
         self.assertFalse(any("-project-" in p.name for p in self.root.iterdir()))
+
+    def test_missing_gyroflow_output_settings_rejected_without_writing(self):
+        def mock_without_output(args, **kwargs):
+            if "--version" in args:
+                return SimpleNamespace(returncode=0, stdout="Gyroflow v1.7.0", stderr="")
+            staged_path = Path(json.loads(args[args.index("--out-params") + 1])["output_path"])
+            staged_path.write_text(json.dumps({
+                "version": 4, "videofile": self.source.resolve().as_uri(),
+                "gyro_source": {"filepath": self.motion.resolve().as_uri()},
+                "calibration_data": {"name": "24mm"}, "offsets": {},
+            }), encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="Export completed", stderr="")
+        with patch("motioncam_gpmf_repair.project._binary", return_value="Gyroflow.exe"), \
+             patch("motioncam_gpmf_repair.project.subprocess.run",
+                   side_effect=mock_without_output):
+            with self.assertRaisesRegex(ProjectError, "missing Gyroflow output settings"):
+                build_project(self.source, lens_profile=self.lens)
+        self.assertFalse((self.root / "recording_review.gyroflow").exists())
 
     def test_output_never_overwrites_user_project(self):
         dest = self.root / "recording_review.gyroflow"
