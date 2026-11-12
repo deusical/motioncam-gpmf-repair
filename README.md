@@ -52,6 +52,41 @@ This writes `clip_imu_diagnostic.json.gz` alongside the MOV. The command also wo
 
 If automatic alignment cannot establish compatible sensor clocks, use the diagnostic to investigate. To intentionally omit acceleration, run `python .\\repair_motioncam_gpmf.py "C:\\path\\clip.mov" --gyro-only`. This explicit fallback does not attempt to align the streams.
 
+## Inspect timing and Gyroflow synchronization
+
+Run an inspection **without converting** the recording or changing its IMU axes.
+The inspector fits both sensor clocks (including when sample counts match),
+compares first-anchored and fitted-intercept GPMF batch timestamp residuals,
+and optionally examines synchronization points from a Gyroflow project.
+
+From the source checkout:
+
+
+~~~powershell
+python .\repair_motioncam_gpmf.py inspect "C:\path\clip.mov"
+python .\repair_motioncam_gpmf.py inspect "C:\path\clip.mov" --project "C:\path\clip.gyroflow"
+python .\repair_motioncam_gpmf.py inspect "C:\path\clip_imu_diagnostic.json.gz" --project "C:\path\clip.gyroflow"
+python .\repair_motioncam_gpmf.py inspect "C:\path\clip.mov" --json --output "C:\path\inspect.json"
+~~~
+
+After installing the package, use `motioncam-gpmf-inspect` or
+`motioncam-gpmf-repair inspect` with the same options.
+
+The JSON report contains aggregate statistics, filenames (not full paths),
+lens and orientation metadata, and Gyroflow sync-point offsets. It does
+**not** copy private raw IMU samples or embedded Gyroflow motion caches.
+A video without an embedded `gpmd` stream is reported as missing
+motion data rather than causing the inspector to crash.
+
+**Interpretation:** GPMF `STMP` metadata may not correspond to
+the first reading of each batch. A large first-anchored residual can reflect
+a systematic timestamp-origin difference. The fitted-intercept residual
+characterizes how well a uniform batch-timestamp model fits; neither
+statistic measures physical gyro sample jitter or establishes the correct
+video/IMU offset. Optical sync-point trends are exploratory and should
+be reviewed in Gyroflow. The inspector does not repair or guess sensor axes.
+
+
 ## Optional lossless video-height normalization
 
 Some camera encoders pad the displayed frame dimensions. This separate utility
