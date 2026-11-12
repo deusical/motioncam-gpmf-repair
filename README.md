@@ -12,7 +12,7 @@ This tool reconstructs a continuous timeline from MotionCam's embedded GPMF gyro
 2. Download/extract this repository or clone it. Drag a MotionCam `.mov` onto **`Convert_MOV_to_GCSV.bat`**.
 3. Find the resulting `<video>_retimed.gcsv` beside your MOV.
 4. Open the original video in **Gyroflow**. Under **Motion data → Open file**, select the new `.gcsv`.
-5. Keep the exported log's orientation metadata rather than manually applying another axis remap. Load a lens profile captured using the *same lens, crop, resolution, and processing mode*.
+5. Load a lens profile matching the *camera lens, crop, and processing mode*. The converter **does not guess or change IMU axis orientation**; use Gyroflow's **Guess IMU orientation** against the footage, and verify the orientation against optical flow. A `.gcsv` without an `orientation` field starts with Gyroflow's default identity mapping.
 6. Remove old synchronization points, run Auto sync (`rs-sync` is a useful alternative), and inspect the resulting offsets before exporting.
 
 Neither the MOV nor its audio/video content is changed. Do not delete your originals.
@@ -25,6 +25,8 @@ From the extracted project folder, with no Python installation step beyond Pytho
 python .\repair_motioncam_gpmf.py "C:\path\clip.mov"
 python .\repair_motioncam_gpmf.py "C:\path\clip.mov" --output "C:\path\clip_retimed.gcsv"
 python .\repair_motioncam_gpmf.py "C:\path\clip.mov" --dry-run
+# Optional, only after independently verifying a mapping in Gyroflow:
+python .\repair_motioncam_gpmf.py "C:\path\clip.mov" --imu-orientation yXz
 ```
 
 Or install as a standard Python CLI:
@@ -46,7 +48,7 @@ To investigate a mismatched or misaligned IMU stream, generate a small compresse
 python .\\extract_motioncam_imu.py "C:\\path\\clip.mov"
 ```
 
-This writes `clip_imu_diagnostic.json.gz` alongside the MOV. The command also works after package installation as `motioncam-gpmf-dump clip.mov`. The diagnostic preserves the original streams and batch timestamps; **no samples are dropped or interpolated in the dump**. Treat the dump as private sensor data, even though images and location fields are omitted.
+This writes `clip_imu_diagnostic.json.gz` alongside the MOV. The command also works after package installation as `motioncam-gpmf-dump clip.mov`. The diagnostic preserves original streams, batch timestamps, and any source GPMF `ORIN`/`ORIO` axis labels; **no samples are dropped or interpolated in the dump**. Those labels are *not automatically assumed to be the camera-to-IMU mapping*. Treat the dump as private sensor data even though images and location fields are omitted.
 
 If automatic alignment cannot establish compatible sensor clocks, use the diagnostic to investigate. To intentionally omit acceleration, run `python .\\repair_motioncam_gpmf.py "C:\\path\\clip.mov" --gyro-only`. This explicit fallback does not attempt to align the streams.
 
@@ -55,7 +57,7 @@ If automatic alignment cannot establish compatible sensor clocks, use the diagno
 1. `ffprobe` finds the embedded `gpmd` track and reads packet boundaries; `ffmpeg` extracts the compressed-container-free GPMF payload.
 2. A limited GPMF parser reads sequential `GYRO` and `ACCL` batches and their scaling and `STMP` timestamps.
 3. The tool checks sample counts, scale consistency, and inferred sampling rate. It treats packet timestamps as unreliable **inside** the recording and uniformly spaces samples between its first and last GYRO packet timestamps.
-4. It writes Gyroflow GCSV with a fixed axis mapping and reconstructed sample timestamps, rather than preserving the original per-batch timing.
+4. It writes Gyroflow GCSV with reconstructed sample timestamps and the **original GPMF axis values**, without changing axis order or sign. Optionally, `--imu-orientation` embeds a user-supplied Gyroflow mapping in metadata but does not alter the samples.
 
 The converter prints how far per-batch timestamp positions disagree with the uniform reconstruction. These deviations are diagnostics, not proof of which software component is responsible. The reconstruction replaces variable per-packet timing with one uniform average and cannot recover missing samples.
 
@@ -65,10 +67,10 @@ This is **not** a generic GoPro GPMF parser, a Video stabilization application, 
 
 ## Limitations and safety
 
-- **Axis mapping is device-specific.** Other hardware orientations, ultrawide/telephoto lenses, or formats may need different mapping.
+- **No hardcoded device-specific axis remapping.** The output retains raw GPMF channel order and sign. Gyroflow defaults to `XYZ` when no orientation metadata is supplied, but this is only the identity transform, **not a claim that the sensor aligns with the camera**. Gyroflow's Guess IMU orientation uses video motion; validate its result and synchronization. If supplying `--imu-orientation`, use a mapping you have independently verified.
 - **Uniform timing is an assumption**, not a restoration of missing timestamps. Dropped samples, varying IMU rates, and clock drift will degrade results. If sync offsets vary substantially across a clip, don't trust the output.
 - When sensor counts match, the converter pairs samples by index. When they differ by exactly one, it attempts to **fit each sensor's sample clock independently and interpolate acceleration at gyro timestamps**, retaining both signals. It refuses this operation if the sample rates disagree or the time ranges do not fully overlap. Larger mismatches require inspection. Equal counts do not prove correct alignment.
-- The original issue could be in metadata generation, decoding, or axis mapping. The working GCSV changes **both** timing and axes, so root cause is not conclusively isolated.
+- The root problem may be in metadata generation, decoding, axis mapping, or synchronization; re-timing alone does not establish the cause. Logs from earlier versions of this tool used a fixed axis transformation; **regenerate them** to compare accurately with this version. Existing Gyroflow orientation settings may no longer apply.
 - Generated GCSV may expose device motion/location context; `.gitignore` excludes MOVs and gyro logs. Never commit actual private recordings.
 - This tool does not stabilize video by itself; Gyroflow does.
 
