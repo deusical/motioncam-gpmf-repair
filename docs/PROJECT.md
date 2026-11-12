@@ -36,6 +36,13 @@ This is important: the `prepare` command deliberately refuses to reuse or
 overwrite a package containing unexpected files. Existing projects are
 never overwritten; use a different `--output` name instead.
 
+Gyroflow initially writes the temporary project staging directory into its
+render-output settings. The exporter re-homes only those two output fields
+before publishing: `output_folder` points beside the final project, and
+`output_filename` becomes `<selected_video>_stabilized.mp4`. This prevents
+an unusable temporary render path and an accidental `.gyroflow` video
+filename. Review export settings in Gyroflow before rendering.
+
 The project exporter checks the prepared manifest, source-file identity,
 GCSV structure, RAW sidecar SHA-256 where applicable, and available lens
 calibration. It calls the official Gyroflow CLI with `--gyro-file`,
