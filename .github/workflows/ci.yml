@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "repair_motioncam_gpmf.py"
+      - "extract_motioncam_imu.py"
+      - "normalize_motioncam_video.py"
+      - "Convert_MOV_to_GCSV.bat"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "repair_motioncam_gpmf.py"
+      - "extract_motioncam_imu.py"
+      - "normalize_motioncam_video.py"
+      - "Convert_MOV_to_GCSV.bat"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax checks and unit tests
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m compileall -q src tests repair_motioncam_gpmf.py extract_motioncam_imu.py normalize_motioncam_video.py
+          python -m unittest discover -s tests -v
+          python -m motioncam_gpmf_repair --help
+          python -m motioncam_gpmf_repair.diagnostics --help
+          python -m motioncam_gpmf_repair.video --help

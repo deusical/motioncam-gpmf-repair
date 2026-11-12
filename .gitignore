@@ -1,0 +1,29 @@
+# Raw footage and personal sensor data
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.mcraw
+*.gcv
+*.gcsv
+*.gpmf
+*.bin
+*.gyroflow
+
+# Python build/runtime
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
