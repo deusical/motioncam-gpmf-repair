@@ -125,6 +125,69 @@ class GpmfTests(unittest.TestCase):
                 rows = list(csv.reader(handle))
             self.assertEqual(rows[-1], ["19000", "-8", "-7", "-9"])
 
+
+    def test_independent_sample_clocks_interpolate_one_extra_accel(self):
+        # Accelerometer started 0.8 sample periods before the gyro, so
+        # it has one extra sample across the same recording interval.
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch = type(parsed.gyro[0])
+        Sensors = type(parsed)
+        gyro = (
+            Batch(2500, 1000, ((1, 2, 3), (2, 3, 4), (3, 4, 5))),
+            Batch(10000, 1000, ((4, 5, 6), (5, 6, 7), (6, 7, 8))),
+        )
+        accel_values = [(10 * k, 20 * k, 30 * k) for k in range(7)]
+        accel = (
+            Batch(500, 1000, tuple(accel_values[:4])),
+            Batch(10500, 1000, tuple(accel_values[4:])),
+        )
+        sensors = Sensors(gyro, accel)
+        report = analyze(Path("sample.mov"), sensors)
+        self.assertEqual(report.alignment, "interpolated")
+        self.assertEqual((report.samples, report.accel_samples), (6, 7))
+        self.assertAlmostEqual(report.interval_us, 2500)
+        self.assertAlmostEqual(report.accel_interval_us, 2500)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / "aligned.gcsv"
+            write_gcsv(Path("sample.mov"), output, sensors, report)
+            with output.open(encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+            row_index = rows.index(["t", "gx", "gy", "gz", "ax", "ay", "az"])
+            samples = rows[row_index + 1:]
+            self.assertEqual(len(samples), 6)
+            self.assertEqual(samples[0], ["2500", "-2", "-1", "-3", "-16.0", "-8.0", "-24.0"])
+            self.assertEqual(samples[-1], ["15000", "-7", "-6", "-8", "-116.0", "-58.0", "-174.0"])
+
+    def test_mismatched_sensor_clocks_rejected(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch = type(parsed.gyro[0])
+        Sensors = type(parsed)
+        gyro = (
+            Batch(2500, 1000, ((1, 2, 3), (2, 3, 4), (3, 4, 5))),
+            Batch(10000, 1000, ((4, 5, 6), (5, 6, 7), (6, 7, 8))),
+        )
+        accel = (
+            Batch(500, 1000, ((1, 2, 3),) * 4),
+            Batch(12000, 1000, ((1, 2, 3),) * 3),
+        )
+        with self.assertRaisesRegex(RepairError, "sample rates disagree"):
+            analyze(Path("sample.mov"), Sensors(gyro, accel))
+
+    def test_mismatched_sensor_timeline_requires_overlap(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch = type(parsed.gyro[0])
+        Sensors = type(parsed)
+        gyro = (
+            Batch(500, 1000, ((1, 2, 3), (2, 3, 4), (3, 4, 5))),
+            Batch(8000, 1000, ((4, 5, 6), (5, 6, 7), (6, 7, 8))),
+        )
+        accel = (
+            Batch(1000, 1000, ((1, 2, 3),) * 4),
+            Batch(11000, 1000, ((1, 2, 3),) * 3),
+        )
+        with self.assertRaisesRegex(RepairError, "outside the accelerometer timeline"):
+            analyze(Path("sample.mov"), Sensors(gyro, accel))
+
     def test_two_extra_accelerometer_samples_still_fail(self):
         pkt = fixture_packet()
         parsed = parse_sensors([len(pkt)], pkt)
