@@ -34,7 +34,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         print(f"\n{result.source}")
         print(f"  Gyro batches: {result.gyro_batches}; accel batches: {result.accel_batches}")
-        print(f"  Samples: {result.samples}; inferred rate: {result.rate_hz:.3f} Hz")
+        print(f"  Samples: gyro={result.samples}; accel={result.accel_samples}; inferred rate: {result.rate_hz:.3f} Hz")
+        if result.accel_samples != result.samples:
+            print("  WARNING: one unmatched sensor sample; exported gyro only to avoid misaligned acceleration values.")
         print(f"  Packet timestamp deviations from uniform fit: median {result.timestamp_mismatch_median_ms:.2f} ms; max {result.timestamp_mismatch_max_ms:.2f} ms")
         if result.output:
             print(f"  Wrote: {result.output}")
