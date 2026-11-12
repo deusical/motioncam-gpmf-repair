@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions and reproducible reports are welcome. This project is currently a narrowly validated workaround, not a universal MotionCam/Gyroflow converter.
+Contributions and reproducible reports are welcome. This is an experimental MotionCam/Gyroflow interoperability tool; contributions should avoid assuming universal device compatibility.
 
 ## Development
 
