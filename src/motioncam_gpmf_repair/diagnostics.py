@@ -65,13 +65,19 @@ def collect_diagnostic(packet_sizes: list[int], raw: bytes, packet_times: list[d
                     raise RepairError(f"Invalid {name} scale in packet {packet_index}")
                 values = [list(sample) for sample in struct.iter_unpack(">hhh", blob)]
                 counts[name] += len(values)
-                tracks[name].append({
+                record = {
                     "packet_index": packet_index,
                     "stream_index": stream_index,
                     "timestamp_us": timestamp_us,
                     "scale": scale,
                     "samples": values,
-                })
+                }
+                # Preserve input/output axis labels for later investigation,
+                # without assuming they describe camera-to-IMU alignment.
+                for key, label in ((b"ORIN", "orientation_in"), (b"ORIO", "orientation_out")):
+                    if key in fields:
+                        record[label] = fields[key].decode("ascii", "replace")
+                tracks[name].append(record)
     if not tracks["gyro"]:
         raise RepairError("No gyro samples found")
     return {
@@ -127,6 +133,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"Saved: {out} ({out.stat().st_size:,} bytes)")
     print(f"Gyro: {result['counts']['gyro']:,}; accel: {result['counts']['accel']:,} samples")
+    for stream_name in ("gyro", "accel"):
+        first = result["tracks"][stream_name][0] if result["tracks"][stream_name] else {}
+        if "orientation_in" in first or "orientation_out" in first:
+            print(f"  GPMF {stream_name} orientation labels: "
+                  f"ORIN={first.get('orientation_in', '?')}, ORIO={first.get('orientation_out', '?')} "
+                  "(not a validated camera-to-IMU mapping)")
     print("The dump contains sensor movement and timestamps but no video or GPS fields; treat it as private.")
     return 0
 
