@@ -38,6 +38,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{result.source}")
         print(f"  Gyro batches: {result.gyro_batches}; accel batches: {result.accel_batches}")
         print(f"  Samples: gyro={result.samples}; accel={result.accel_samples}; inferred rate: {result.rate_hz:.3f} Hz")
+        if result.alignment == "interpolated":
+            print(f"  IMU alignment: resampled accelerometer onto gyro times (periods: "
+                  f"gyro={result.interval_us:.6f} us; accel={result.accel_interval_us:.6f} us)")
+        elif result.alignment == "index":
+            print("  IMU alignment: equal-length streams paired by index")
+
         if args.gyro_only:
             print("  WARNING: --gyro-only selected; accelerometer stream deliberately omitted.")
         print(f"  Packet timestamp deviations from uniform fit: median {result.timestamp_mismatch_median_ms:.2f} ms; max {result.timestamp_mismatch_max_ms:.2f} ms")
