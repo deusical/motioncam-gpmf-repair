@@ -13,7 +13,7 @@ from .core import RepairError, repair
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="motioncam-gpmf-repair",
-        description="Experimental: retime embedded MotionCam GPMF gyro data for Gyroflow (validated on Vivo X100 Ultra main camera).",
+        description="Experimental: reconstruct embedded MotionCam GPMF gyro timing for Gyroflow.",
     )
     parser.add_argument("files", nargs="+", type=Path, help="MotionCam MOV video(s) containing a gpmd data track")
     parser.add_argument("-o", "--output", type=Path, help="Output path (only valid with one input)")
