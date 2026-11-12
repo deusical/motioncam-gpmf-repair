@@ -270,6 +270,31 @@ class GyroflowProjectTests(unittest.TestCase):
         selected_video, _, _, _ = _selected_files(self.source)
         self.assertEqual(selected_video, selected.resolve())
 
+    def test_reference_uses_normalized_video_dimensions(self):
+        selected = self.package / "recording_3840x2160.mov"
+        selected.write_bytes(b"synthetic normalized video")
+        man = json.loads((self.package / "manifest.json").read_text(encoding="utf-8"))
+        man["files"]["video"] = selected.name
+        (self.package / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+        # Original container is padded to 2176, but normalized output is 2160.
+        self.inspection["video"]["height"] = 2176
+        (self.package / "inspection.json").write_text(json.dumps(self.inspection))
+        with patch("motioncam_gpmf_repair.project._run",
+                   return_value=json.dumps({"streams": [{"width": 3840, "height": 2160}]})):
+            result = build_project(self.source, reference=self.reference, dry_run=True)
+        self.assertEqual(result["video"], str(selected.resolve()))
+        self.assertEqual(result["lens"], "Vivo_X100 Ultra_24mm_4k")
+
+    def test_invalid_normalized_video_ffprobe_rejected(self):
+        selected = self.package / "recording_3840x2160.mov"
+        selected.write_bytes(b"synthetic normalized video")
+        man = json.loads((self.package / "manifest.json").read_text(encoding="utf-8"))
+        man["files"]["video"] = selected.name
+        (self.package / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+        with patch("motioncam_gpmf_repair.project._run", return_value='{"streams": []}'):
+            with self.assertRaisesRegex(ProjectError, "Cannot inspect normalized"):
+                build_project(self.source, reference=self.reference, dry_run=True)
+
     def test_fail_quality_rejected(self):
         self.inspection["quality"]["status"] = "fail"
         (self.package / "inspection.json").write_text(json.dumps(self.inspection))
