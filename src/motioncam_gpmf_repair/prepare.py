@@ -58,6 +58,25 @@ def _read_known_package(folder: Path, *, expected_source: str) -> dict:
         raise PrepareError("Existing output folder is not a recognized prepared package")
     if manifest.get("version") not in (1, 2):
         raise PrepareError("Existing package manifest version is unsupported")
+    if manifest["version"] == 2:
+        motion_info = manifest.get("motion_input")
+        if not isinstance(motion_info, dict) or motion_info.get("kind") not in (
+            "embedded_gpmd", "sidecar_gcsv"
+        ):
+            raise PrepareError("Existing v2 package has invalid motion source metadata")
+        if motion_info["kind"] == "sidecar_gcsv":
+            item = motion_info.get("file")
+            if not isinstance(item, dict) or not (
+                isinstance(item.get("filename"), str)
+                and item["filename"].lower().endswith(".gcsv")
+                and isinstance(item.get("size_bytes"), int)
+                and item["size_bytes"] > 0
+                and isinstance(item.get("mtime_ns"), int)
+                and isinstance(item.get("sha256"), str)
+                and len(item["sha256"]) == 64
+                and all(c in "0123456789abcdef" for c in item["sha256"])
+            ):
+                raise PrepareError("Existing v2 package has invalid sidecar fingerprint")
     source_info = manifest.get("source")
     if not isinstance(source_info, dict) or source_info.get("filename") != expected_source:
         raise PrepareError("Existing package belongs to a different source filename")
