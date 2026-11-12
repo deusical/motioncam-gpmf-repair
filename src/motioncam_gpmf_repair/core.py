@@ -45,6 +45,8 @@ class RepairReport:
     accel_samples: int
     rate_hz: float
     interval_us: float
+    accel_interval_us: float | None
+    alignment: str
     timestamp_mismatch_max_ms: float
     timestamp_mismatch_median_ms: float
     output: str | None
@@ -150,6 +152,35 @@ def _sensor_scale(batches: tuple[SensorBatch, ...], label: str) -> int:
     return next(iter(scales))
 
 
+def _fitted_period_us(batches: tuple[SensorBatch, ...], label: str) -> float:
+    """Fit a sample period from all batch starts, tolerating irregular STMP packet timing.
+
+    GPMF packets can pool more than one frame's samples, so an endpoint-only
+    estimate may drift. Fitting all STMP/sample-index anchors is more robust.
+    """
+    if len(batches) < 2:
+        raise RepairError(f"At least two {label} batches are needed to infer a sample period")
+    indices: list[int] = []
+    timestamps: list[int] = []
+    cumulative = 0
+    for batch in batches:
+        indices.append(cumulative)
+        timestamps.append(batch.timestamp_us)
+        cumulative += len(batch.samples)
+    avg_idx = sum(indices) / len(indices)
+    avg_ts = sum(timestamps) / len(timestamps)
+    denominator = sum((idx - avg_idx) ** 2 for idx in indices)
+    if denominator <= 0:
+        raise RepairError(f"Cannot infer {label} sampling rate")
+    interval = sum(
+        (idx - avg_idx) * (timestamp - avg_ts)
+        for idx, timestamp in zip(indices, timestamps)
+    ) / denominator
+    if not math.isfinite(interval) or not 250 <= interval <= 20000:
+        raise RepairError(f"Implausible {label} sample period: {interval} us")
+    return interval
+
+
 def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> RepairReport:
     gyro, accel = sensors.gyro, sensors.accel
     _sensor_scale(gyro, "GYRO")
@@ -158,17 +189,38 @@ def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> Re
         raise RepairError("At least two gyro batches are needed to infer sample rate")
     n_g = sum(len(b.samples) for b in gyro)
     n_a = sum(len(b.samples) for b in accel)
-    if n_g != n_a and not gyro_only:
-        raise RepairError(
-            f"Mismatched sensor sample counts (gyro={n_g}, accel={n_a}); "
-            "refusing to pair out-of-phase values. Use extract_motioncam_imu.py "
-            "to collect a diagnostic, or explicitly pass --gyro-only."
-        )
+    alignment = "gyro-only" if gyro_only else "index"
+    accel_interval_us = None
     last_start_index = n_g - len(gyro[-1].samples)
     elapsed_us = gyro[-1].timestamp_us - gyro[0].timestamp_us
     if last_start_index <= 0 or elapsed_us <= 0:
         raise RepairError("Invalid timestamp endpoints")
     interval_us = elapsed_us / last_start_index
+    if n_g != n_a and not gyro_only:
+        if abs(n_g - n_a) != 1:
+            raise RepairError(
+                f"Mismatched sensor sample counts (gyro={n_g}, accel={n_a}); "
+                "automatic resampling only supports a one-sample difference. "
+                "Use extract_motioncam_imu.py to inspect the streams."
+            )
+        interval_us = _fitted_period_us(gyro, "gyro")
+        accel_interval_us = _fitted_period_us(accel, "accelerometer")
+        drift = abs(interval_us - accel_interval_us) / interval_us
+        if drift > 0.001:
+            raise RepairError(
+                f"Gyro/accelerometer sample rates disagree ({drift * 100:.3f}%); "
+                "not safe to resample automatically."
+            )
+        gyro_first = gyro[0].timestamp_us
+        gyro_last = gyro_first + (n_g - 1) * interval_us
+        accel_first = accel[0].timestamp_us
+        accel_last = accel_first + (n_a - 1) * accel_interval_us
+        if gyro_first < accel_first or gyro_last > accel_last:
+            raise RepairError(
+                "Gyro timestamps extend outside the accelerometer timeline; "
+                "cannot interpolate without extrapolation. Inspect the IMU diagnostic."
+            )
+        alignment = "interpolated"
     rate_hz = 1_000_000 / interval_us
     if not math.isfinite(rate_hz) or not 50 <= rate_hz <= 4000:
         raise RepairError(f"Implausible gyro rate: {rate_hz:.2f} Hz")
@@ -184,6 +236,7 @@ def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> Re
     return RepairReport(
         source=source.name, gyro_batches=len(gyro), accel_batches=len(accel),
         samples=n_g, accel_samples=n_a, rate_hz=rate_hz, interval_us=interval_us,
+        accel_interval_us=accel_interval_us, alignment=alignment,
         timestamp_mismatch_max_ms=deviations[-1],
         timestamp_mismatch_median_ms=median, output=None,
     )
@@ -193,7 +246,7 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
                gyro_only: bool = False) -> None:
     """Write a uniform-timeline GCSV, omitting unpairable accelerometer data."""
     scale_g = _sensor_scale(sensors.gyro, "GYRO")
-    include_accel = not gyro_only and report.samples == report.accel_samples
+    include_accel = not gyro_only and report.alignment != "gyro-only"
     scale_a = _sensor_scale(sensors.accel, "ACCL") if include_accel else None
     with dest.open("w", newline="", encoding="utf-8") as handle:
         handle.write("GYROFLOW IMU LOG\n")
@@ -215,7 +268,29 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
             writer.writerow(row)
         first = sensors.gyro[0].timestamp_us
         gyro_samples = (xyz for batch in sensors.gyro for xyz in batch.samples)
-        if include_accel:
+        if report.alignment == "interpolated":
+            # Resample acceleration at actual gyro times. No sample is
+            # arbitrarily removed; the two sensors are independent clocks.
+            acceleration = [sample for batch in sensors.accel for sample in batch.samples]
+            accel_first = sensors.accel[0].timestamp_us
+            accel_period = report.accel_interval_us
+            if accel_period is None:
+                raise RepairError("Missing accelerometer sample period for interpolation")
+            for idx, (gx, gy, gz) in enumerate(gyro_samples):
+                time_us = first + idx * report.interval_us
+                accel_position = (time_us - accel_first) / accel_period
+                lower = min(len(acceleration) - 2, max(0, math.floor(accel_position)))
+                weight = min(1.0, max(0.0, accel_position - lower))
+                ax, ay, az = (
+                    acceleration[lower][axis] * (1.0 - weight)
+                    + acceleration[lower + 1][axis] * weight
+                    for axis in range(3)
+                )
+                writer.writerow([
+                    round(time_us), -gy, -gx, -gz,
+                    round(-ay, 6), round(-ax, 6), round(-az, 6),
+                ])
+        elif include_accel:
             accel_samples = (xyz for batch in sensors.accel for xyz in batch.samples)
             for idx, (g, a) in enumerate(zip(gyro_samples, accel_samples)):
                 gx, gy, gz = g
