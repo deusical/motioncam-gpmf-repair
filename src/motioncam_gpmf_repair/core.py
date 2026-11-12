@@ -42,6 +42,7 @@ class RepairReport:
     gyro_batches: int
     accel_batches: int
     samples: int
+    accel_samples: int
     rate_hz: float
     interval_us: float
     timestamp_mismatch_max_ms: float
@@ -157,8 +158,11 @@ def analyze(source: Path, sensors: SensorData) -> RepairReport:
         raise RepairError("At least two gyro batches are needed to infer sample rate")
     n_g = sum(len(b.samples) for b in gyro)
     n_a = sum(len(b.samples) for b in accel)
-    if n_g != n_a:
+    if abs(n_g - n_a) > 1:
         raise RepairError(f"Mismatched sensor sample counts (gyro={n_g}, accel={n_a}); refusing to pair out-of-phase values")
+    # A single unmatched reading can occur anywhere in either stream.
+    # Never guess which accelerometer sample to discard: for this small mismatch,
+    # keep all gyro samples and omit acceleration from the GCSV.
     last_start_index = n_g - len(gyro[-1].samples)
     elapsed_us = gyro[-1].timestamp_us - gyro[0].timestamp_us
     if last_start_index <= 0 or elapsed_us <= 0:
@@ -178,20 +182,21 @@ def analyze(source: Path, sensors: SensorData) -> RepairReport:
     median = (deviations[middle] if len(deviations) % 2 else (deviations[middle - 1] + deviations[middle]) / 2)
     return RepairReport(
         source=source.name, gyro_batches=len(gyro), accel_batches=len(accel),
-        samples=n_g, rate_hz=rate_hz, interval_us=interval_us,
+        samples=n_g, accel_samples=n_a, rate_hz=rate_hz, interval_us=interval_us,
         timestamp_mismatch_max_ms=deviations[-1],
         timestamp_mismatch_median_ms=median, output=None,
     )
 
 
 def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairReport) -> None:
-    """Write the experimental X100 Ultra axes with a uniform timeline."""
+    """Write a uniform-timeline GCSV, omitting unpairable accelerometer data."""
     scale_g = _sensor_scale(sensors.gyro, "GYRO")
-    scale_a = _sensor_scale(sensors.accel, "ACCL")
+    include_accel = report.samples == report.accel_samples
+    scale_a = _sensor_scale(sensors.accel, "ACCL") if include_accel else None
     with dest.open("w", newline="", encoding="utf-8") as handle:
         handle.write("GYROFLOW IMU LOG\n")
         writer = csv.writer(handle, lineterminator="\n")
-        for row in [
+        metadata = [
             ("version", "1.3"),
             ("id", f"{source.stem}_MotionCam_retimed"),
             ("orientation", "XYZ"),
@@ -200,17 +205,23 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
             ("videofilename", source.name),
             ("tscale", "0.000001"),
             ("gscale", str(1.0 / scale_g)),
-            ("ascale", str(1.0 / (scale_a * GRAVITY))),
-            ("t", "gx", "gy", "gz", "ax", "ay", "az"),
-        ]:
+        ]
+        if include_accel:
+            metadata.append(("ascale", str(1.0 / (scale_a * GRAVITY))))
+        metadata.append(("t", "gx", "gy", "gz", "ax", "ay", "az") if include_accel else ("t", "gx", "gy", "gz"))
+        for row in metadata:
             writer.writerow(row)
         first = sensors.gyro[0].timestamp_us
         gyro_samples = (xyz for batch in sensors.gyro for xyz in batch.samples)
-        accel_samples = (xyz for batch in sensors.accel for xyz in batch.samples)
-        for idx, (g, a) in enumerate(zip(gyro_samples, accel_samples)):
-            gx, gy, gz = g
-            ax, ay, az = a
-            writer.writerow([round(first + idx * report.interval_us), -gy, -gx, -gz, -ay, -ax, -az])
+        if include_accel:
+            accel_samples = (xyz for batch in sensors.accel for xyz in batch.samples)
+            for idx, (g, a) in enumerate(zip(gyro_samples, accel_samples)):
+                gx, gy, gz = g
+                ax, ay, az = a
+                writer.writerow([round(first + idx * report.interval_us), -gy, -gx, -gz, -ay, -ax, -az])
+        else:
+            for idx, (gx, gy, gz) in enumerate(gyro_samples):
+                writer.writerow([round(first + idx * report.interval_us), -gy, -gx, -gz])
 
 
 def repair(source: Path, destination: Path | None = None, *, overwrite: bool = False,
