@@ -38,6 +38,18 @@ motioncam-gpmf-repair clip.mov --overwrite
 
 Run `motioncam-gpmf-repair --help` for options. Requires external FFmpeg utilities; uses only the Python standard library at runtime.
 
+## Extract sensor diagnostics (no video upload)
+
+To investigate a mismatched or misaligned IMU stream, generate a small compressed diagnostic that contains **both** raw gyro and accelerometer samples, their original `STMP` values, per-batch packet indices, and container packet timestamps. It contains no video frames, audio, or GPS fields.
+
+```powershell
+python .\\extract_motioncam_imu.py "C:\\path\\clip.mov"
+```
+
+This writes `clip_imu_diagnostic.json.gz` alongside the MOV. The command also works after package installation as `motioncam-gpmf-dump clip.mov`. The dump bypasses the sample-count equality check; **no samples are dropped or interpolated**. Treat the dump as private sensor data, even though images and location fields are omitted.
+
+If you intentionally want to ignore acceleration and proceed with gyro-based stabilization, use `python .\\repair_motioncam_gpmf.py "C:\\path\\clip.mov" --gyro-only`. This option does **not** align the two streams or determine which sample is extra.
+
 ## How it works
 
 1. `ffprobe` finds the embedded `gpmd` track and reads packet boundaries; `ffmpeg` extracts the compressed-container-free GPMF payload.
@@ -55,7 +67,7 @@ This is **not** a generic GoPro GPMF parser, a Video stabilization application, 
 
 - **Axis mapping is device-specific.** Other hardware orientations, ultrawide/telephoto lenses, or formats may need different mapping.
 - **Uniform timing is an assumption**, not a restoration of missing timestamps. Dropped samples, varying IMU rates, and clock drift will degrade results. If sync offsets vary substantially across a clip, don't trust the output.
-- When gyro and accelerometer sample counts match, the converter pairs samples by index; if a mismatch of exactly one sample occurs, it exports gyro-only GCSV rather than guessing which accelerometer reading to discard. Larger mismatches are rejected. Gyro-only logs can be used for rotational stabilization, but gravity-assisted horizon leveling may be limited. Equal counts do not guarantee perfect alignment.
+- When gyro and accelerometer sample counts match, the converter pairs samples by index. **Any count mismatch fails closed by default** because an extra sample may occur anywhere in the stream. Use the diagnostic extractor to investigate; `--gyro-only` explicitly exports gyro without acceleration as a fallback. Equal counts do not prove correct alignment.
 - The original issue could be in metadata generation, decoding, or axis mapping. The working GCSV changes **both** timing and axes, so root cause is not conclusively isolated.
 - Generated GCSV may expose device motion/location context; `.gitignore` excludes MOVs and gyro logs. Never commit actual private recordings.
 - This tool does not stabilize video by itself; Gyroflow does.
