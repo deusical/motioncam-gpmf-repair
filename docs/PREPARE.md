@@ -1,9 +1,11 @@
 # One-command MotionCam preparation
 
-The `prepare` command combines inspection, the existing experimentally
-validated GPMF-to-GCSV repair, and optional explicit lossless HEVC-height
-normalization. It does not change the sensor clock model, axis order, or
-camera-to-IMU mapping.
+The `prepare` command combines recording inspection, a selected motion-data
+path, and optional explicit lossless HEVC-height normalization. Direct-log
+recordings with embedded GPMF use the established GPMF-to-GCSV reconstruction.
+Rendered RAW recordings use an original Gyroflow GCSV sidecar, without changing
+any existing samples, timestamps, scales or axis metadata. The tool never
+infers a camera-to-IMU mapping.
 
 ## Typical workflow
 
@@ -12,6 +14,10 @@ Run these commands from the checked-out repository:
 ~~~powershell
 python .\repair_motioncam_gpmf.py prepare "C:\path\clip.mov" --dry-run
 python .\repair_motioncam_gpmf.py prepare "C:\path\clip.mov"
+# If the MOV is a RAW render with an adjacent matching GCSV, auto-discover it:
+python .\repair_motioncam_gpmf.py prepare "C:\path\rendered_RAW.mov"
+# Or explicitly select a GCSV:
+python .\repair_motioncam_gpmf.py prepare "C:\path\rendered_RAW.mov" --motion "C:\path\original.gcsv"
 ~~~
 
 Or, after installing the Python package:
@@ -23,10 +29,17 @@ motioncam-gpmf-prepare "C:\path\clip.mov"
 This creates `clip_prepared` **beside** the original video. The prepared
 directory contains:
 
-- `clip_retimed.gcsv`: motion data with reconstructed timing, original axes;
-- `inspection.json`: sanitized aggregate sensor, packet, and quality evidence;
-- `manifest.json`: package filenames, chosen options, and quick source/project
-  fingerprints (file size and modification time).
+- `clip_retimed.gcsv` for direct-log recordings: reconstructed embedded
+  motion timing, original sensor axes;
+- `clip_motion.gcsv` for RAW recordings: an exact byte-for-byte copy of
+  the original GCSV sidecar; **no retiming or gyro/accel interpolation**;
+- `inspection.json`: sanitized aggregate video and selected motion source
+  evidence, explicit validation limitations, and warnings;
+- `manifest.json`: package filenames, chosen options, quick video/project
+  fingerprints (size+mtime), and for RAW GCSV the sidecar's SHA-256 digest.
+
+The manifest format is v2; existing v1 direct-log packages can still be
+reused or overwritten safely.
 
 The **original source video remains at its original location** and is not
 copied, changed, or removed. Do not delete it: Gyroflow still needs the video.
@@ -35,6 +48,37 @@ A quality WARNING without an existing Gyroflow project is expected. The
 pipeline can prepare the motion file before optical sync is performed;
 it must not label the recording optically verified just because conversion
 succeeded.
+
+## How motion input is selected
+
+1. If `--motion FILE.gcsv` is supplied, **that sidecar is used** even if
+   the video also contains embedded GPMF; its original bytes are preserved.
+2. Otherwise, if the video contains usable embedded GPMF, use the established
+   reconstruction path.
+3. Otherwise, if the video lacks embedded GPMF, look for one adjacent GCSV
+   with the exact video stem or a stem prefix ending at an underscore.
+   For example `clip_24mm.gcsv` matches the RAW render
+   `clip_24mm_BT.709_BT709.mov`.
+4. Multiple matching sidecars are **ambiguous**: specify `--motion`.
+   Neither embedded GPMF nor a sidecar: fail with a useful error.
+
+Auto-discovery excludes known derived `_retimed.gcsv` files. It does not
+read motion from a video or reconstruct it when none exists. If you choose a
+RAW GCSV, `--gyro-only` and `--imu-orientation` are refused, because they
+would contradict byte-for-byte preservation. Set orientation in Gyroflow.
+
+The RAW GCSV parser checks headers, positive numeric scales, sample columns,
+finite values, strictly increasing timestamps, and large timestamp gaps.
+MotionCam's trailing empty CSV column is explicitly supported. It reports
+a median sample rate in units determined by `tscale`; no sample is discarded
+or resampled. The original motion metadata may include device timestamps;
+only aggregate measurements are put in the report, never raw sensor arrays.
+
+A RAW sidecar may span more time than a rendered MOV (for instance if the RAW
+was trimmed during rendering). Duration discrepancies are **warnings, not
+instructions to stretch timestamps**; Gyroflow optical sync is still required.
+The GCSV's original header is preserved, including any `videofilename` field,
+which may refer to a different video name.
 
 ## Optional operations
 
@@ -76,8 +120,9 @@ python .\repair_motioncam_gpmf.py prepare clip.mov --reuse
 
 Reuse is **explicit**. It verifies the generated filenames exist and that the
 original source and optional Gyroflow project match quick size/mtime fingerprints
-and the previous options. It does not revalidate the recording, calculate a
-cryptographic checksum, or check whether the saved output is otherwise corrupt.
+and the previous options. When RAW GCSV is used, the sidecar also must match
+its saved SHA-256 checksum. Reuse does not revalidate the motion stream,
+optical synchronization or whether the prepared output has been corrupted.
 
 To regenerate an existing package:
 
@@ -100,8 +145,7 @@ synchronization has been independently verified.
 
 - No Gyroflow automatic lens selection, IMU orientation detection, optical
   synchronization, project generation, or stabilized rendering.
-- No support for external motion log files when the video lacks embedded
-  GPMF; this is a separate planned enhancement.
+- RAW GCSV sidecars are supported. Other external motion formats are not.
 - No automatic compensation for a fixed video/IMU offset, suspicious
   `STMP` origins, frame duplication or physical camera jerks.
 - No direct editing of the MOV/MP4 source, and no guarantee that a recording
