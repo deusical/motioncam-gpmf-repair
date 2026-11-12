@@ -44,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
         if result.alignment == "interpolated":
             print(f"  IMU alignment: resampled accelerometer onto gyro times (periods: "
                   f"gyro={result.interval_us:.6f} us; accel={result.accel_interval_us:.6f} us)")
+            if result.accel_clamp_start_us or result.accel_clamp_end_us:
+                print("  WARNING: nearest-value acceleration at uncovered edge(s): "
+                      f"start {result.accel_clamp_start_us:.3f} us, "
+                      f"end {result.accel_clamp_end_us:.3f} us; no extrapolation.")
         elif result.alignment == "index":
             print("  IMU alignment: equal-length streams paired by index")
 
