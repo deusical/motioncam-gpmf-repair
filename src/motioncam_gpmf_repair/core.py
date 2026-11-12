@@ -48,6 +48,8 @@ class RepairReport:
     interval_us: float
     accel_interval_us: float | None
     alignment: str
+    accel_clamp_start_us: float
+    accel_clamp_end_us: float
     timestamp_mismatch_max_ms: float
     timestamp_mismatch_median_ms: float
     output: str | None
@@ -192,6 +194,8 @@ def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> Re
     n_a = sum(len(b.samples) for b in accel)
     alignment = "gyro-only" if gyro_only else "index"
     accel_interval_us = None
+    accel_clamp_start_us = 0.0
+    accel_clamp_end_us = 0.0
     last_start_index = n_g - len(gyro[-1].samples)
     elapsed_us = gyro[-1].timestamp_us - gyro[0].timestamp_us
     if last_start_index <= 0 or elapsed_us <= 0:
@@ -216,10 +220,16 @@ def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> Re
         gyro_last = gyro_first + (n_g - 1) * interval_us
         accel_first = accel[0].timestamp_us
         accel_last = accel_first + (n_a - 1) * accel_interval_us
-        if gyro_first < accel_first or gyro_last > accel_last:
+        # Independently started/stopped IMUs may differ by a fractional sample.
+        # Interpolate within coverage and HOLD the nearest observed accel sample
+        # at uncovered edges. Never linearly extrapolate beyond observed data.
+        accel_clamp_start_us = max(0.0, accel_first - gyro_first)
+        accel_clamp_end_us = max(0.0, gyro_last - accel_last)
+        if max(accel_clamp_start_us, accel_clamp_end_us) > accel_interval_us * (1 + 1e-6):
             raise RepairError(
-                "Gyro timestamps extend outside the accelerometer timeline; "
-                "cannot interpolate without extrapolation. Inspect the IMU diagnostic."
+                "Gyro timestamps extend more than one sample interval outside "
+                "the accelerometer timeline; refusing to fill a large gap. "
+                "Inspect the IMU diagnostic."
             )
         alignment = "interpolated"
     rate_hz = 1_000_000 / interval_us
@@ -238,6 +248,7 @@ def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> Re
         source=source.name, gyro_batches=len(gyro), accel_batches=len(accel),
         samples=n_g, accel_samples=n_a, rate_hz=rate_hz, interval_us=interval_us,
         accel_interval_us=accel_interval_us, alignment=alignment,
+        accel_clamp_start_us=accel_clamp_start_us, accel_clamp_end_us=accel_clamp_end_us,
         timestamp_mismatch_max_ms=deviations[-1],
         timestamp_mismatch_median_ms=median, output=None,
     )
@@ -292,6 +303,7 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
             for idx, (gx, gy, gz) in enumerate(gyro_samples):
                 time_us = first + idx * report.interval_us
                 accel_position = (time_us - accel_first) / accel_period
+                # Boundary values are clamped (sample-and-hold), not extrapolated.
                 lower = min(len(acceleration) - 2, max(0, math.floor(accel_position)))
                 weight = min(1.0, max(0.0, accel_position - lower))
                 ax, ay, az = (
