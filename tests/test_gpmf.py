@@ -91,12 +91,14 @@ class GpmfTests(unittest.TestCase):
         first = parsed.accel[0]
         extra = type(first)(first.timestamp_us, first.scale, ((999, 999, 999),) + first.samples)
         modified = type(parsed)(parsed.gyro, (extra,) + parsed.accel[1:])
-        report = analyze(Path("sample.mov"), modified)
+        with self.assertRaisesRegex(RepairError, "Mismatched sensor sample counts"):
+            analyze(Path("sample.mov"), modified)
+        report = analyze(Path("sample.mov"), modified, gyro_only=True)
         self.assertEqual(report.samples, 6)
         self.assertEqual(report.accel_samples, 7)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / "sample.gcsv"
-            write_gcsv(Path("sample.mov"), output, modified, report)
+            write_gcsv(Path("sample.mov"), output, modified, report, gyro_only=True)
             with output.open(encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
             header_idx = rows.index(["t", "gx", "gy", "gz"])
@@ -111,12 +113,14 @@ class GpmfTests(unittest.TestCase):
         last = parsed.gyro[-1]
         extra = type(last)(last.timestamp_us, last.scale, last.samples + ((7, 8, 9),))
         modified = type(parsed)(parsed.gyro[:-1] + (extra,), parsed.accel)
-        report = analyze(Path("sample.mov"), modified)
+        with self.assertRaisesRegex(RepairError, "Mismatched sensor sample counts"):
+            analyze(Path("sample.mov"), modified)
+        report = analyze(Path("sample.mov"), modified, gyro_only=True)
         self.assertEqual(report.samples, 7)
         self.assertEqual(report.accel_samples, 6)
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / "sample.gcsv"
-            write_gcsv(Path("sample.mov"), output, modified, report)
+            write_gcsv(Path("sample.mov"), output, modified, report, gyro_only=True)
             with output.open(encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
             self.assertEqual(rows[-1], ["19000", "-8", "-7", "-9"])
