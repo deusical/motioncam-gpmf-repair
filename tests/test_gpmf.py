@@ -17,6 +17,7 @@ from motioncam_gpmf_repair.core import (  # noqa: E402
     repair,
     sensor_streams,
     write_gcsv,
+    validate_imu_orientation,
 )
 
 
@@ -72,10 +73,33 @@ class GpmfTests(unittest.TestCase):
             output = Path(d) / "sample.gcsv"
             write_gcsv(Path("sample.mov"), output, parsed, report)
             with output.open(encoding="utf-8") as f:
-                rows = list(csv.reader(f))[11:]
-            self.assertEqual(rows[0], ["1000", "-2", "-1", "-3", "-20", "-10", "-30"])
-            self.assertEqual(rows[-1], ["16000", "-7", "-6", "-8", "-25", "-15", "-35"])
+                contents = list(csv.reader(f))
+            self.assertFalse(any(row and row[0] == "orientation" for row in contents))
+            rows = contents[contents.index(["t", "gx", "gy", "gz", "ax", "ay", "az"]) + 1:]
+            self.assertEqual(rows[0], ["1000", "1", "2", "3", "10", "20", "30"])
+            self.assertEqual(rows[-1], ["16000", "6", "7", "8", "15", "25", "35"])
             self.assertEqual(len(rows), 6)
+
+    def test_orientation_metadata_is_optional_and_never_changes_sensor_axes(self):
+        pkt = fixture_packet()
+        sensors = parse_sensors([len(pkt)], pkt)
+        report = analyze(Path("sample.mov"), sensors)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / "sample.gcsv"
+            write_gcsv(Path("sample.mov"), output, sensors, report, imu_orientation="yXz")
+            with output.open(encoding="utf-8") as f:
+                rows = list(csv.reader(f))
+            self.assertIn(["orientation", "yXz"], rows)
+            index = rows.index(["t", "gx", "gy", "gz", "ax", "ay", "az"])
+            self.assertEqual(rows[index + 1], ["1000", "1", "2", "3", "10", "20", "30"])
+
+    def test_invalid_orientations_are_rejected(self):
+        for axes in ("XXZ", "YX", "ABZ", "XYZx"):
+            with self.subTest(axes=axes):
+                with self.assertRaises(RepairError):
+                    validate_imu_orientation(axes)
+        validate_imu_orientation(None)
+        validate_imu_orientation("yXz")
 
     def test_mismatched_sample_counts_fail_closed(self):
         parsed = parse_sensors([len(fixture_packet())], fixture_packet())
@@ -103,8 +127,8 @@ class GpmfTests(unittest.TestCase):
                 rows = list(csv.reader(handle))
             header_idx = rows.index(["t", "gx", "gy", "gz"])
             self.assertFalse(any(row and row[0] == "ascale" for row in rows))
-            self.assertEqual(rows[header_idx + 1], ["1000", "-2", "-1", "-3"])
-            self.assertEqual(rows[-1], ["16000", "-7", "-6", "-8"])
+            self.assertEqual(rows[header_idx + 1], ["1000", "1", "2", "3"])
+            self.assertEqual(rows[-1], ["16000", "6", "7", "8"])
             self.assertEqual(len(rows) - header_idx - 1, 6)
 
     def test_one_extra_gyro_sample_uses_gyro_only(self):
@@ -123,7 +147,7 @@ class GpmfTests(unittest.TestCase):
             write_gcsv(Path("sample.mov"), output, modified, report, gyro_only=True)
             with output.open(encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
-            self.assertEqual(rows[-1], ["19000", "-8", "-7", "-9"])
+            self.assertEqual(rows[-1], ["19000", "7", "8", "9"])
 
 
     def test_independent_sample_clocks_interpolate_one_extra_accel(self):
@@ -155,8 +179,8 @@ class GpmfTests(unittest.TestCase):
             row_index = rows.index(["t", "gx", "gy", "gz", "ax", "ay", "az"])
             samples = rows[row_index + 1:]
             self.assertEqual(len(samples), 6)
-            self.assertEqual(samples[0], ["2500", "-2", "-1", "-3", "-16.0", "-8.0", "-24.0"])
-            self.assertEqual(samples[-1], ["15000", "-7", "-6", "-8", "-116.0", "-58.0", "-174.0"])
+            self.assertEqual(samples[0], ["2500", "1", "2", "3", "8.0", "16.0", "24.0"])
+            self.assertEqual(samples[-1], ["15000", "6", "7", "8", "58.0", "116.0", "174.0"])
 
     def test_mismatched_sensor_clocks_rejected(self):
         parsed = parse_sensors([len(fixture_packet())], fixture_packet())
