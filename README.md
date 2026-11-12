@@ -86,6 +86,34 @@ and optical sync manually. If a normalized video is used, manually select
 the GCSV; its video-filename metadata still names the original video.
 For details, see [preparation workflow](docs/PREPARE.md).
 
+## Generate Gyroflow projects (PR #6)
+
+Once a video has a prepared package, generate a **review-ready** Gyroflow project
+using Gyroflow 1.7+ and a calibration you explicitly trust:
+
+~~~powershell
+# Use settings and lens calibration from an existing Gyroflow project;
+# the old video's sync points and IMU caches are never reused.
+python .\repair_motioncam_gpmf.py project "C:\path\clip.mov" --reference "C:\path\known_calibrated_clip.gyroflow" --dry-run
+python .\repair_motioncam_gpmf.py project "C:\path\clip.mov" --reference "C:\path\known_calibrated_clip.gyroflow"
+
+# Or pass an explicit Gyroflow lens calibration JSON
+python .\repair_motioncam_gpmf.py project "C:\path\clip.mov" --lens-profile "C:\path\profile.json"
+~~~
+
+The default output is `clip_review.gyroflow` beside the video (not inside
+`clip_prepared/`, which is treated as an immutable generated package).
+The program uses Gyroflow's CLI to author the actual project with the
+prepared GCSV; it does **not** render a video or run optical synchronization.
+The new project is validated for its video path, gyro source, selected lens
+and absence of old synchronization offsets. Existing project files are
+never overwritten. You still need to open the result in Gyroflow to perform
+optical sync and visually confirm calibration before exporting.
+
+The executable must be on `PATH`, or pass
+`--gyroflow "C:\path\Gyroflow.exe"`. See [project generation and
+calibration notes](docs/PROJECT.md) for limitations and preset behavior.
+
 ## Extract sensor diagnostics (no video upload)
 
 To investigate a mismatched or misaligned IMU stream, generate a small compressed diagnostic that contains **both** raw gyro and accelerometer samples, their original `STMP` values, per-batch packet indices, and container packet timestamps. It contains no video frames, audio, or GPS fields.
