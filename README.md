@@ -114,6 +114,23 @@ The executable must be on `PATH`, or pass
 `--gyroflow "C:\path\Gyroflow.exe"`. See [project generation and
 calibration notes](docs/PROJECT.md) for limitations and preset behavior.
 
+## Experimental headless Auto Sync probe (PR #8A)
+
+Gyroflow 1.7 supports headless synchronization before project export, but it
+may skip the operation if the motion metadata claims accurate timestamps.
+Verify this behavior **before** building an unattended stabilizer:
+
+~~~powershell
+python .\repair_motioncam_gpmf.py project "C:\path\clip.mov" --reference "C:\path\calibrated.gyroflow" --sync-probe --gyroflow "C:\path\Gyroflow.exe"
+~~~
+
+The probe does **not** render a video. It writes a new
+`clip_sync_probe.gyroflow` plus `clip_sync_probe_report.json`. Zero saved
+sync points are reported as **inconclusive** (exit code 2), even if Gyroflow
+exits successfully; nonzero points are **unverified**, not a quality PASS.
+The original `project` command remains review-only and sync-disabled.
+See [Auto Sync feasibility guide](docs/SYNC_PROBE.md).
+
 ## Extract sensor diagnostics (no video upload)
 
 To investigate a mismatched or misaligned IMU stream, generate a small compressed diagnostic that contains **both** raw gyro and accelerometer samples, their original `STMP` values, per-batch packet indices, and container packet timestamps. It contains no video frames, audio, or GPS fields.
