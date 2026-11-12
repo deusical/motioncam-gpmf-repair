@@ -252,6 +252,26 @@ def _verify_export(project: Path, video: Path, motion: Path, *, lens_name: str |
     }
 
 
+def _finalize_render_destination(project: Path, destination: Path, video: Path) -> None:
+    """Re-home Gyroflow's temporary export settings before publishing.
+
+    Gyroflow's export-project CLI records the staging directory as its video
+    output_folder and the project filename as its output_filename. Both become
+    invalid/misleading after the .gyroflow project is moved into place.
+    Touch ONLY these two output settings in the Gyroflow-authored JSON.
+    """
+    contents = _read_json(project)
+    render = contents.get("output")
+    if not isinstance(render, dict):
+        raise ProjectError("Exported project is missing Gyroflow output settings")
+    render["output_folder"] = destination.parent.as_uri()
+    render["output_filename"] = video.stem + "_stabilized.mp4"
+    project.write_text(
+        json.dumps(contents, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def build_project(
     video: Path, *, reference: Path | None = None, preset: Path | None = None,
     lens_profile: Path | None = None, gyroflow: str | None = None,
@@ -375,6 +395,10 @@ def build_project(
             error = (run.stderr or run.stdout).strip()[-900:]
             raise ProjectError(f"Gyroflow project export exited {run.returncode}: {error}")
         exported = _verify_export(staged_out, selected_video, motion, lens_name=lens_name)
+        _finalize_render_destination(staged_out, destination, selected_video)
+        # The finalizer alters only output folder/name; verify source references
+        # again so the final published project remains rooted in the right data.
+        _verify_export(staged_out, selected_video, motion, lens_name=lens_name)
         if destination.exists():
             raise ProjectError("Destination appeared during export; refusing to overwrite")
         os.replace(staged_out, destination)
