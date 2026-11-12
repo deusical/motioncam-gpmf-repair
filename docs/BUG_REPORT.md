@@ -29,6 +29,6 @@ Do **not** post private videos, raw gyro logs, identifying locations, or unrevie
 
 ## Scope of investigation
 
-Unexpected results may originate from metadata generation, timestamp interpretation, dropped samples, variable sampling rates, coordinate mapping, or synchronization settings. The converter modifies both timing and coordinate mapping; an improved result does not by itself isolate the cause.
+Unexpected results may originate from metadata generation, timestamp interpretation, dropped samples, variable sampling rates, coordinate mapping, or synchronization settings. The converter reconstructs timing while preserving original sensor axis values. Camera-to-IMU mapping is determined separately in Gyroflow or explicitly supplied using `--imu-orientation`; the effectiveness of either adjustment should be verified against visual motion.
 
 Reference: [GoPro GPMF common header](https://github.com/gopro/gpmf-parser/blob/main/GPMF_common.h).
