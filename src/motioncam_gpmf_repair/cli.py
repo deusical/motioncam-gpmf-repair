@@ -21,6 +21,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Inspect metadata without generating GCSV")
     parser.add_argument("--gyro-only", action="store_true",
                         help="Explicitly discard accelerometer stream (e.g. if sample counts mismatch)")
+    parser.add_argument("--imu-orientation", metavar="AXES",
+                        help="Optional Gyroflow axis mapping (e.g. yXz); raw GPMF values remain unchanged. "
+                             "If omitted, determine orientation in Gyroflow.")
     parser.add_argument("--version", action="version", version=__version__)
     args = parser.parse_args(argv)
     if args.output and len(args.files) != 1:
@@ -30,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     for file in args.files:
         try:
             result = repair(file, args.output, overwrite=args.overwrite, dry_run=args.dry_run,
-                            gyro_only=args.gyro_only)
+                            gyro_only=args.gyro_only, imu_orientation=args.imu_orientation)
         except (RepairError, OSError, ValueError) as exc:
             print(f"ERROR: {file}: {exc}", file=sys.stderr)
             failures += 1
@@ -51,7 +54,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Wrote: {result.output}")
         else:
             print("  Dry run: no file written")
-        print("  Verify sync offsets in Gyroflow; this mapping is experimental.")
+        if args.imu_orientation:
+            print(f"  Gyroflow IMU orientation metadata: {args.imu_orientation} (raw axes unchanged)")
+        else:
+            print("  IMU orientation unspecified: use Gyroflow's Guess IMU orientation and verify against optical flow.")
+        print("  Verify sync offsets in Gyroflow; timing reconstruction remains experimental.")
     return 1 if failures else 0
 
 
