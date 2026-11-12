@@ -118,6 +118,124 @@ class GyroflowProjectTests(unittest.TestCase):
         export_path.write_text(json.dumps(data), encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="Export completed", stderr="")
 
+    def _fake_sync_probe(self, args, **kwargs):
+        if "--version" in args:
+            return SimpleNamespace(returncode=0, stdout="Gyroflow v1.7.0", stderr="")
+        settings = json.loads(args[args.index("--sync-params") + 1])
+        self.assertTrue(settings["do_autosync"])
+        self.assertEqual(settings["do_optical_correction"], False)
+        self.assertEqual(settings["processing_resolution"], 720)
+        self.assertEqual(settings["max_sync_points"], 5)
+        self.assertIn("--export-project", args)
+        self.assertEqual(args[args.index("--export-project") + 1], "2")
+        self.assertNotIn("--optical-correction", args)
+        path = Path(json.loads(args[args.index("--out-params") + 1])["output_path"])
+        preset_path = Path(args[args.index("--preset") + 1])
+        preset = json.loads(preset_path.read_text())
+        self.assertTrue(preset["calibration_data"]["sync_settings"]["do_autosync"])
+        self.assertTrue(preset["synchronization"]["do_autosync"])
+        self.assertNotIn("videofile", preset)
+        self.assertNotIn("offsets", preset)
+        self.assertNotIn("old.gcsv", json.dumps(preset))
+        data = {
+            "version": 4, "videofile": self.source.resolve().as_uri(),
+            "gyro_source": {"filepath": self.motion.resolve().as_uri(), "imu_orientation": "XYZ"},
+            "calibration_data": preset["calibration_data"],
+            "offsets": {"1000000": -8.2, "2000000": -8.4, "3000000": -8.1},
+            "output": {"output_folder": path.parent.as_uri(), "output_filename": path.name},
+        }
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="Export completed", stderr="")
+
+    def test_probe_single_invocation_saves_new_offsets_and_report(self):
+        with patch("motioncam_gpmf_repair.project._binary", return_value="Gyroflow.exe"), \
+             patch("motioncam_gpmf_repair.project.subprocess.run", side_effect=self._fake_sync_probe):
+            result = build_project(self.source, reference=self.reference, sync_probe=True)
+        self.assertEqual(result["status"], "offsets_present_unverified")
+        self.assertEqual(result["project"]["sync_point_count"], 3)
+        self.assertAlmostEqual(result["project"]["offset_span_ms"], 0.3)
+        output = self.root / "recording_sync_probe.gyroflow"
+        report = self.root / "recording_sync_probe_report.json"
+        self.assertTrue(output.exists())
+        saved = json.loads(report.read_text())
+        self.assertTrue(saved["review_required"])
+        self.assertEqual(saved["project"]["sync_point_count"], 3)
+        self.assertNotIn("old/source", output.read_text())
+        self.assertEqual(json.loads(output.read_text())["output"]["output_folder"],
+                         self.root.resolve().as_uri())
+
+    def test_probe_zero_points_is_not_claimed_success(self):
+        def fake_zero(args, **kwargs):
+            result = self._fake_sync_probe(args, **kwargs)
+            if "--version" not in args:
+                path = Path(json.loads(args[args.index("--out-params") + 1])["output_path"])
+                data = json.loads(path.read_text())
+                data["offsets"] = {}
+                path.write_text(json.dumps(data))
+            return result
+        with patch("motioncam_gpmf_repair.project._binary", return_value="Gyroflow.exe"), \
+             patch("motioncam_gpmf_repair.project.subprocess.run", side_effect=fake_zero):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                code = main([str(self.source), "--reference", str(self.reference),
+                             "--sync-probe"])
+        self.assertEqual(code, 2)
+        self.assertIn("no_sync_points", output.getvalue())
+        report = json.loads((self.root / "recording_sync_probe_report.json").read_text())
+        self.assertEqual(report["status"], "no_sync_points")
+        self.assertIn("may have skipped", report["interpretation"])
+
+    def test_probe_lens_profile_injects_autosync_settings(self):
+        def fake_lens(args, **kwargs):
+            if "--version" in args:
+                return SimpleNamespace(returncode=0, stdout="Gyroflow v1.7.0", stderr="")
+            staged = [Path(x) for x in args if x.endswith("review_lens.json")]
+            self.assertEqual(len(staged), 1)
+            lens = json.loads(staged[0].read_text())
+            self.assertTrue(lens["sync_settings"]["do_autosync"])
+            out = Path(json.loads(args[args.index("--out-params") + 1])["output_path"])
+            out.write_text(json.dumps({
+                "version": 4, "videofile": self.source.resolve().as_uri(),
+                "gyro_source": {"filepath": self.motion.resolve().as_uri()},
+                "calibration_data": {"name": "24mm"},
+                "offsets": {"1000000": -10.0},
+                "output": {"output_folder": out.parent.as_uri(), "output_filename": out.name},
+            }))
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        with patch("motioncam_gpmf_repair.project._binary", return_value="Gyroflow.exe"), \
+             patch("motioncam_gpmf_repair.project.subprocess.run", side_effect=fake_lens):
+            result = build_project(self.source, lens_profile=self.lens, sync_probe=True)
+        self.assertEqual(result["project"]["sync_point_count"], 1)
+
+    def test_probe_refuses_bad_params_and_existing_report(self):
+        for opt in (
+            {"search_size": 0},
+            {"search_size": float("nan")},
+            {"max_sync_points": 0},
+            {"sync_resolution": 721},
+        ):
+            with self.subTest(opt=opt):
+                with self.assertRaises(ProjectError):
+                    build_project(self.source, reference=self.reference,
+                                  sync_probe=True, dry_run=True, **opt)
+        with self.assertRaisesRegex(ProjectError, "require --sync-probe"):
+            build_project(self.source, reference=self.reference,
+                          search_size=0.8, dry_run=True)
+        report = self.root / "recording_sync_probe_report.json"
+        report.write_text("USER DATA")
+        with self.assertRaisesRegex(ProjectError, "report already exists"):
+            build_project(self.source, reference=self.reference, sync_probe=True,
+                          dry_run=True)
+        self.assertEqual(report.read_text(), "USER DATA")
+
+    def test_probe_dry_run_does_not_touch_files_or_run_gyroflow(self):
+        with patch("motioncam_gpmf_repair.project.subprocess.run") as exe:
+            result = build_project(self.source, reference=self.reference,
+                                   sync_probe=True, dry_run=True)
+        self.assertEqual(result["status"], "dry_run")
+        self.assertIn("experimental autosync", result["optical_sync"])
+        exe.assert_not_called()
+        self.assertFalse((self.root / "recording_sync_probe.gyroflow").exists())
+
     def test_prepared_package_paths_and_structural_gcsv(self):
         video, motion, manifest, inspection = _selected_files(self.source)
         self.assertEqual(video, self.source.resolve())
