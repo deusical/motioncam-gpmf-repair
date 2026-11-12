@@ -55,7 +55,7 @@ This is **not** a generic GoPro GPMF parser, a Video stabilization application, 
 
 - **Axis mapping is device-specific.** Other hardware orientations, ultrawide/telephoto lenses, or formats may need different mapping.
 - **Uniform timing is an assumption**, not a restoration of missing timestamps. Dropped samples, varying IMU rates, and clock drift will degrade results. If sync offsets vary substantially across a clip, don't trust the output.
-- It pairs GYRO/ACCL samples by index only after checking counts; if data are missing but totals happen to match, problems may still be undetected.
+- When gyro and accelerometer sample counts match, the converter pairs samples by index; if a mismatch of exactly one sample occurs, it exports gyro-only GCSV rather than guessing which accelerometer reading to discard. Larger mismatches are rejected. Gyro-only logs can be used for rotational stabilization, but gravity-assisted horizon leveling may be limited. Equal counts do not guarantee perfect alignment.
 - The original issue could be in metadata generation, decoding, or axis mapping. The working GCSV changes **both** timing and axes, so root cause is not conclusively isolated.
 - Generated GCSV may expose device motion/location context; `.gitignore` excludes MOVs and gyro logs. Never commit actual private recordings.
 - This tool does not stabilize video by itself; Gyroflow does.
