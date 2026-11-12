@@ -83,6 +83,53 @@ class GpmfTests(unittest.TestCase):
         with self.assertRaisesRegex(RepairError, "Mismatched sensor sample counts"):
             analyze(Path("sample.mov"), modified)
 
+
+    def test_one_extra_accelerometer_sample_uses_gyro_only(self):
+        pkt = fixture_packet()
+        parsed = parse_sensors([len(pkt)], pkt)
+        # Extra ACCL sample could be at the start of the stream.
+        first = parsed.accel[0]
+        extra = type(first)(first.timestamp_us, first.scale, ((999, 999, 999),) + first.samples)
+        modified = type(parsed)(parsed.gyro, (extra,) + parsed.accel[1:])
+        report = analyze(Path("sample.mov"), modified)
+        self.assertEqual(report.samples, 6)
+        self.assertEqual(report.accel_samples, 7)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / "sample.gcsv"
+            write_gcsv(Path("sample.mov"), output, modified, report)
+            with output.open(encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+            header_idx = rows.index(["t", "gx", "gy", "gz"])
+            self.assertFalse(any(row and row[0] == "ascale" for row in rows))
+            self.assertEqual(rows[header_idx + 1], ["1000", "-2", "-1", "-3"])
+            self.assertEqual(rows[-1], ["16000", "-7", "-6", "-8"])
+            self.assertEqual(len(rows) - header_idx - 1, 6)
+
+    def test_one_extra_gyro_sample_uses_gyro_only(self):
+        pkt = fixture_packet()
+        parsed = parse_sensors([len(pkt)], pkt)
+        last = parsed.gyro[-1]
+        extra = type(last)(last.timestamp_us, last.scale, last.samples + ((7, 8, 9),))
+        modified = type(parsed)(parsed.gyro[:-1] + (extra,), parsed.accel)
+        report = analyze(Path("sample.mov"), modified)
+        self.assertEqual(report.samples, 7)
+        self.assertEqual(report.accel_samples, 6)
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / "sample.gcsv"
+            write_gcsv(Path("sample.mov"), output, modified, report)
+            with output.open(encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+            self.assertEqual(rows[-1], ["19000", "-8", "-7", "-9"])
+
+    def test_two_extra_accelerometer_samples_still_fail(self):
+        pkt = fixture_packet()
+        parsed = parse_sensors([len(pkt)], pkt)
+        first = parsed.accel[0]
+        extra = type(first)(first.timestamp_us, first.scale, first.samples + ((1, 1, 1), (2, 2, 2)))
+        modified = type(parsed)(parsed.gyro, (extra,) + parsed.accel[1:])
+        with self.assertRaisesRegex(RepairError, "Mismatched sensor sample counts"):
+            analyze(Path("sample.mov"), modified)
+
     def test_output_guard_and_dry_run(self):
         pkt = fixture_packet()
         with tempfile.TemporaryDirectory() as d:
