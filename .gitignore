@@ -10,6 +10,11 @@
 *.bin
 *.gyroflow
 
+# Generated preparation packages (may contain private recording metadata)
+*_prepared/
+.*_prepared-stage-*/
+.*_prepared-backup-*/
+
 # Python build/runtime
 __pycache__/
 *.py[cod]

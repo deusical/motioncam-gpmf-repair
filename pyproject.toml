@@ -24,6 +24,7 @@ motioncam-gpmf-repair = "motioncam_gpmf_repair.cli:main"
 motioncam-gpmf-dump = "motioncam_gpmf_repair.diagnostics:main"
 motioncam-video-normalize = "motioncam_gpmf_repair.video:main"
 motioncam-gpmf-inspect = "motioncam_gpmf_repair.inspect:main"
+motioncam-gpmf-prepare = "motioncam_gpmf_repair.prepare:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

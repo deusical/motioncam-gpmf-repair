@@ -11,6 +11,8 @@ on:
       - "extract_motioncam_imu.py"
       - "normalize_motioncam_video.py"
       - "Convert_MOV_to_GCSV.bat"
+      - "prepare_motioncam_video.py"
+      - "prepare_motioncam_video.py"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
@@ -44,10 +46,12 @@ jobs:
         env:
           PYTHONPATH: src
         run: |
-          python -m compileall -q src tests repair_motioncam_gpmf.py extract_motioncam_imu.py normalize_motioncam_video.py
+          python -m compileall -q src tests repair_motioncam_gpmf.py extract_motioncam_imu.py normalize_motioncam_video.py prepare_motioncam_video.py
           python -m unittest discover -s tests -v
           python -m motioncam_gpmf_repair --help
           python -m motioncam_gpmf_repair.diagnostics --help
           python -m motioncam_gpmf_repair.video --help
           python -m motioncam_gpmf_repair.inspect --help
           python -m motioncam_gpmf_repair inspect --help
+          python -m motioncam_gpmf_repair.prepare --help
+          python -m motioncam_gpmf_repair prepare --help

@@ -40,6 +40,44 @@ motioncam-gpmf-repair clip.mov --overwrite
 
 Run `motioncam-gpmf-repair --help` for options. Requires external FFmpeg utilities; uses only the Python standard library at runtime.
 
+## One-command preparation
+
+Prepare a Gyroflow-compatible motion file and a quality report in one operation.
+The original MOV/MP4 stays untouched in its original directory; it is **not**
+copied into the prepared package. Source files must have an embedded GPMF track
+(external motion-file support is planned separately).
+
+~~~powershell
+python .\repair_motioncam_gpmf.py prepare "C:\path\clip.mov"
+python .\repair_motioncam_gpmf.py prepare "C:\path\clip.mov" --dry-run
+# Optional: if you *know* the source has bottom HEVC padding:
+python .\repair_motioncam_gpmf.py prepare "C:\path\clip.mov" --target-height 2160
+# Optional: import existing optical sync checks into the quality report:
+python .\repair_motioncam_gpmf.py prepare "C:\path\clip.mov" --project "C:\path\clip.gyroflow"
+~~~
+
+Creates `clip_prepared/` next to the source, containing a `clip_retimed.gcsv`,
+`inspection.json`, and `manifest.json`. A normalized video copy is only
+created when `--target-height` or `--aspect` is **explicitly** supplied.
+No lens profile, row crop, gyro orientation, or sync correction is guessed.
+Without a Gyroflow project, the quality report normally carries a WARNING
+because optical synchronization has **not** been verified.
+
+Existing output folders are refused by default. Use `--reuse` to skip work
+only if a previously generated package has matching source/project
+size+modification-time fingerprints and options; this is **not** a content
+integrity check or fresh validation. Use `--overwrite` to regenerate an
+intact prepared package. It refuses arbitrary folders and user-added files,
+stages outputs in a temporary sibling, and retains the prior package if a
+processing step fails. `--dry-run` performs checks without writing anything.
+`--output-dir`, `--gyro-only`, and `--imu-orientation` are also supported.
+
+Once complete, open the **original** video (or requested normalized copy) in
+Gyroflow and load the generated GCSV. Verify the lens profile, orientation
+and optical sync manually. If a normalized video is used, manually select
+the GCSV; its video-filename metadata still names the original video.
+For details, see [preparation workflow](docs/PREPARE.md).
+
 ## Extract sensor diagnostics (no video upload)
 
 To investigate a mismatched or misaligned IMU stream, generate a small compressed diagnostic that contains **both** raw gyro and accelerometer samples, their original `STMP` values, per-batch packet indices, and container packet timestamps. It contains no video frames, audio, or GPS fields.
