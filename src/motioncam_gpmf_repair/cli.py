@@ -11,6 +11,11 @@ from .core import RepairError, repair
 
 
 def main(argv: list[str] | None = None) -> int:
+    requested = sys.argv[1:] if argv is None else argv
+    if requested and requested[0] == "inspect":
+        from .inspect import main as inspect_main
+        return inspect_main(requested[1:])
+
     parser = argparse.ArgumentParser(
         prog="motioncam-gpmf-repair",
         description="Experimental: reconstruct embedded MotionCam GPMF gyro timing for Gyroflow.",
@@ -25,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Optional Gyroflow axis mapping (e.g. yXz); raw GPMF values remain unchanged. "
                              "If omitted, determine orientation in Gyroflow.")
     parser.add_argument("--version", action="version", version=__version__)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(requested)
     if args.output and len(args.files) != 1:
         parser.error("--output requires exactly one input video")
 

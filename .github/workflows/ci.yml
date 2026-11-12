@@ -49,3 +49,5 @@ jobs:
           python -m motioncam_gpmf_repair --help
           python -m motioncam_gpmf_repair.diagnostics --help
           python -m motioncam_gpmf_repair.video --help
+          python -m motioncam_gpmf_repair.inspect --help
+          python -m motioncam_gpmf_repair inspect --help
