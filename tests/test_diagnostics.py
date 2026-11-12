@@ -33,6 +33,21 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["packet_times"][1]["pts_time"], "0.033")
         self.assertNotIn("source", report)
 
+    def test_gpmf_axis_labels_preserved_as_metadata(self):
+        import struct
+        sensor_stream = (
+            rec(b"STMP", ord("J"), 8, (1000).to_bytes(8, "big"))
+            + rec(b"SCAL", ord("l"), 4, (100).to_bytes(4, "big", signed=True))
+            + rec(b"ORIN", ord("c"), 1, b"ZXY")
+            + rec(b"ORIO", ord("c"), 1, b"XYZ")
+            + rec(b"GYRO", ord("s"), 2, struct.pack(">hhh", 1, 2, 3))
+        )
+        pkt = b"0000GPMF" + rec(b"DEVC", 0, 1, rec(b"STRM", 0, 1, sensor_stream))
+        result = collect_diagnostic([len(pkt)], pkt)
+        self.assertEqual(result["tracks"]["gyro"][0]["orientation_in"], "ZXY")
+        self.assertEqual(result["tracks"]["gyro"][0]["orientation_out"], "XYZ")
+        self.assertEqual(result["tracks"]["gyro"][0]["samples"], [[1, 2, 3]])
+
     def test_dump_writes_small_gzip_and_rejects_overwrite(self):
         pkt = b"0000GPMF" + rec(b"DEVC", 0, 1,
             batch(b"GYRO", 1000, 1000, [(1, 2, 3)]) +
