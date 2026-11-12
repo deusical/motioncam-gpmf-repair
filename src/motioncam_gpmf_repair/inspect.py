@@ -17,6 +17,10 @@ from urllib.parse import unquote, urlsplit
 
 from .core import RepairError, SensorBatch, _fitted_period_us, _run, extract_gpmd
 from .diagnostics import _packet_times, collect_diagnostic
+from .validation import (
+    packet_pts_summary, packet_video_pts_alignment, quality_assessment,
+    video_pts_summary,
+)
 
 
 class InspectError(Exception):
@@ -125,6 +129,7 @@ def inspect_sensor_diagnostic(data: dict) -> dict:
         "accel": _stream_summary("accelerometer", accel) if accel else None,
         "packet_count": len(data.get("packet_sizes") or []),
         "clock_alignment": {"status": "unknown"},
+        "packet_timing": packet_pts_summary(data),
         "warnings": [],
     }
     warnings = result["warnings"]
@@ -223,6 +228,7 @@ def inspect_gyroflow_project(path: Path) -> dict:
             f"{video.get('width')}x{video.get('height')}"
             if video.get("width") and video.get("height") else None
         ),
+        "video_fps": video.get("fps"),
         "imu_orientation": source.get("imu_orientation"),
         "rolling_shutter_readout_ms": calibration.get("frame_readout_time"),
         "sync_points": points,
@@ -257,11 +263,14 @@ def inspect_file(path: Path, project_path: Path | None = None) -> dict:
         "version": 1,
         "source_filename": path.name,
         "video": None,
+        "video_timing": None,
+        "packet_video_timing": None,
         "imu": None,
         "gyroflow": None,
         "warnings": [],
     }
     suffix = path.name.lower()
+    diagnostic = None
     if suffix.endswith(".json.gz"):
         try:
             with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -284,6 +293,20 @@ def inspect_file(path: Path, project_path: Path | None = None) -> dict:
             "codec": video.get("codec_name"),
             "fps": video.get("avg_frame_rate"),
         } if video else None)
+        try:
+            video_packets = json.loads(_run([
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_packets", "-show_entries", "packet=pts_time,duration_time",
+                "-of", "json", str(path),
+            ]))
+            result["video_timing"] = video_pts_summary(video_packets)
+        except (RepairError, ValueError) as error:
+            video_packets = None
+            result["video_timing"] = {
+                "status": "unavailable",
+                "reason": "Cannot inspect video frame PTS; conversion checks remain independent",
+            }
+            result["warnings"].append("Video packet PTS unavailable for comparison")
         if not any(s.get("codec_tag_string") == "gpmd" for s in streams):
             result["imu"] = {"status": "missing", "warnings": [
                 "Video has no embedded gpmd track; check for a separate motion log"
@@ -293,6 +316,10 @@ def inspect_file(path: Path, project_path: Path | None = None) -> dict:
                 sizes, raw = extract_gpmd(path)
                 diagnostic = collect_diagnostic(sizes, raw, _packet_times(path, sizes))
                 result["imu"] = inspect_sensor_diagnostic(diagnostic)
+                if video_packets is not None:
+                    result["packet_video_timing"] = packet_video_pts_alignment(
+                        diagnostic, video_packets,
+                    )
             except RepairError as error:
                 result["imu"] = {"status": "error", "warnings": [str(error)]}
     else:
@@ -313,11 +340,16 @@ def inspect_file(path: Path, project_path: Path | None = None) -> dict:
         result["warnings"].append(
             "No Gyroflow project supplied; optical synchronization cannot be assessed"
         )
+    result["quality"] = quality_assessment(result)
     return result
 
 
 def format_report(report: dict) -> str:
     lines = [f"MotionCam inspection: {report['source_filename']}"]
+    quality = report.get("quality", {})
+    if quality:
+        lines.append(f"  Automated check: {quality['status'].upper()} "
+                     "(not a guarantee of good stabilization)")
     video = report.get("video")
     if video:
         lines.append(
@@ -362,6 +394,30 @@ def format_report(report: dict) -> str:
                 f"{stmp['first_timestamp_minus_fitted_intercept_ms']} ms "
                 "(timestamp semantics not established)"
             )
+        packet = imu.get("packet_timing") or {}
+        if packet.get("status") in {"observed", "warning"}:
+            for name in ("gyro", "accel"):
+                stream = packet.get("streams", {}).get(name) or {}
+                if "median_packet_pts_minus_stmp_ms" in stream:
+                    lines.append(
+                        f"  {name.title()} metadata packet PTS - STMP: median "
+                        f"{stream['median_packet_pts_minus_stmp_ms']} ms; "
+                        f"5-95% spread {stream['p05_p95_spread_ms']} ms"
+                    )
+    frame_timing = report.get("video_timing") or {}
+    if frame_timing.get("status") == "observed":
+        lines.append(
+            f"  Video frame packet PTS: median step "
+            f"{frame_timing['median_frame_pts_interval_ms']} ms; "
+            f"{frame_timing['intervals_longer_than_1_5x_median']} larger gaps"
+        )
+    packet_alignment = report.get("packet_video_timing") or {}
+    if packet_alignment.get("status") == "observed":
+        lines.append(
+            f"  Nearest video/metadata packet PTS distance: median "
+            f"{packet_alignment['median_nearest_video_pts_distance_ms']} ms "
+            "(container timing only)"
+        )
     project = report.get("gyroflow")
     if project:
         lines.append(
@@ -380,6 +436,10 @@ def format_report(report: dict) -> str:
                 f"{project['exploratory_linear_trend_ppm']} ppm "
                 "(not proof of clock drift)"
             )
+    if quality:
+        optical = quality["optical_sync"]
+        lines.append(f"  Optical validation: {optical['status']} — {optical['reason']}")
+        lines.append("  Manual visual verification is still required")
     for warning in report["warnings"]:
         lines.append(f"  NOTE: {warning}")
     return "\n".join(lines)
