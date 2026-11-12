@@ -150,7 +150,7 @@ def _sensor_scale(batches: tuple[SensorBatch, ...], label: str) -> int:
     return next(iter(scales))
 
 
-def analyze(source: Path, sensors: SensorData) -> RepairReport:
+def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> RepairReport:
     gyro, accel = sensors.gyro, sensors.accel
     _sensor_scale(gyro, "GYRO")
     _sensor_scale(accel, "ACCL")
@@ -158,11 +158,12 @@ def analyze(source: Path, sensors: SensorData) -> RepairReport:
         raise RepairError("At least two gyro batches are needed to infer sample rate")
     n_g = sum(len(b.samples) for b in gyro)
     n_a = sum(len(b.samples) for b in accel)
-    if abs(n_g - n_a) > 1:
-        raise RepairError(f"Mismatched sensor sample counts (gyro={n_g}, accel={n_a}); refusing to pair out-of-phase values")
-    # A single unmatched reading can occur anywhere in either stream.
-    # Never guess which accelerometer sample to discard: for this small mismatch,
-    # keep all gyro samples and omit acceleration from the GCSV.
+    if n_g != n_a and not gyro_only:
+        raise RepairError(
+            f"Mismatched sensor sample counts (gyro={n_g}, accel={n_a}); "
+            "refusing to pair out-of-phase values. Use extract_motioncam_imu.py "
+            "to collect a diagnostic, or explicitly pass --gyro-only."
+        )
     last_start_index = n_g - len(gyro[-1].samples)
     elapsed_us = gyro[-1].timestamp_us - gyro[0].timestamp_us
     if last_start_index <= 0 or elapsed_us <= 0:
@@ -188,10 +189,11 @@ def analyze(source: Path, sensors: SensorData) -> RepairReport:
     )
 
 
-def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairReport) -> None:
+def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairReport, *,
+               gyro_only: bool = False) -> None:
     """Write a uniform-timeline GCSV, omitting unpairable accelerometer data."""
     scale_g = _sensor_scale(sensors.gyro, "GYRO")
-    include_accel = report.samples == report.accel_samples
+    include_accel = not gyro_only and report.samples == report.accel_samples
     scale_a = _sensor_scale(sensors.accel, "ACCL") if include_accel else None
     with dest.open("w", newline="", encoding="utf-8") as handle:
         handle.write("GYROFLOW IMU LOG\n")
@@ -225,7 +227,7 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
 
 
 def repair(source: Path, destination: Path | None = None, *, overwrite: bool = False,
-           dry_run: bool = False) -> RepairReport:
+           dry_run: bool = False, gyro_only: bool = False) -> RepairReport:
     if not source.is_file():
         raise RepairError(f"File does not exist: {source}")
     destination = destination or source.with_name(source.stem + "_retimed.gcsv")
@@ -235,7 +237,7 @@ def repair(source: Path, destination: Path | None = None, *, overwrite: bool = F
         raise RepairError(f"Output already exists: {destination} (pass --overwrite to replace)")
     sizes, raw = extract_gpmd(source)
     sensors = parse_sensors(sizes, raw)
-    report = analyze(source, sensors)
+    report = analyze(source, sensors, gyro_only=gyro_only)
     if not dry_run:
         if not destination.parent.is_dir():
             raise RepairError(f"Output folder does not exist: {destination.parent}")
@@ -247,7 +249,7 @@ def repair(source: Path, destination: Path | None = None, *, overwrite: bool = F
                 dir=destination.parent, prefix=".motioncam-", suffix=".gcsv", delete=False
             ) as tmp:
                 temp_name = Path(tmp.name)
-            write_gcsv(source, temp_name, sensors, report)
+            write_gcsv(source, temp_name, sensors, report, gyro_only=gyro_only)
             os.replace(temp_name, destination)
         finally:
             if temp_name is not None:
