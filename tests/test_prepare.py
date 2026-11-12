@@ -209,10 +209,157 @@ class PrepareTests(unittest.TestCase):
                 "imu": {"status": "missing", "warnings": ["No gpmd track"]},
                 "quality": {"status": "warning"},
             }
-            with self.assertRaisesRegex(PrepareError, "External motion-file support"):
+            with self.assertRaisesRegex(PrepareError, "No embedded GPMF or matching"):
                 prepare(self.source)
         rep.assert_not_called()
         self.assertFalse(self.output_dir.exists())
+
+    def _create_raw_sidecar(self, *, name="sample.gcsv"):
+        file = self.folder / name
+        file.write_text(
+            "GYROFLOW IMU LOG\nversion,1.2\norientation,XYZ\n"
+            "tscale,0.0022743480\ngscale,0.0000000100\n"
+            "ascale,0.0000000100\nt,gx,gy,gz,ax,ay,az\n"
+            "0,11,12,13,21,22,23,\n1,12,13,14,22,23,24,\n"
+            "2,13,14,15,23,24,25,\n",
+            encoding="utf-8",
+        )
+        return file
+
+    def test_raw_gcsv_autodiscovery_preserves_bytes(self):
+        source_log = self._create_raw_sidecar()
+        original = source_log.read_bytes()
+        with mocked_processing() as (inspect, rep, norm):
+            inspect.side_effect = None
+            inspect.return_value = fake_inspect(self.source)
+            inspect.return_value["imu"] = {"status": "missing"}
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds", return_value=0.2):
+                result = prepare(self.source)
+        self.assertEqual(result["mode"], "sidecar_gcsv")
+        rep.assert_not_called()
+        motion = self.output_dir / "sample_motion.gcsv"
+        self.assertEqual(motion.read_bytes(), original)
+        self.assertEqual(source_log.read_bytes(), original)
+        self.assertEqual(self.source.read_bytes(), self.original_bytes)
+        report = json.loads((self.output_dir / "inspection.json").read_text())
+        self.assertEqual(report["motion_source"]["processing"], "copied_without_retiming")
+        self.assertEqual(report["external_motion"]["sample_count"], 3)
+        self.assertEqual(report["quality"]["status"], "warning")
+        manifest = json.loads((self.output_dir / "manifest.json").read_text())
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(manifest["motion_input"]["kind"], "sidecar_gcsv")
+        self.assertEqual(len(manifest["motion_input"]["file"]["sha256"]), 64)
+
+    def test_raw_gcsv_duration_mismatch_warns_without_resampling(self):
+        sidecar = self._create_raw_sidecar()
+        with mocked_processing() as (ins, rep, norm):
+            ins.side_effect = None
+            ins.return_value = fake_inspect(self.source)
+            ins.return_value["imu"] = {"status": "missing"}
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds",
+                       return_value=5):
+                result = prepare(self.source, motion=sidecar, dry_run=True)
+        self.assertEqual(result["status"], "dry_run")
+        self.assertTrue(any("duration differs" in x for x in result["warnings"]))
+        self.assertFalse(self.output_dir.exists())
+
+    def test_raw_sidecar_requires_no_axes_or_gyro_only_overrides(self):
+        sidecar = self._create_raw_sidecar()
+        with mocked_processing() as (ins, rep, norm):
+            for kwargs in ({"gyro_only": True}, {"imu_orientation": "XYZ"}):
+                with self.subTest(kwargs=kwargs):
+                    with self.assertRaisesRegex(PrepareError, "preserved verbatim"):
+                        prepare(self.source, motion=sidecar, **kwargs)
+        rep.assert_not_called()
+
+    def test_explicit_raw_sidecar_overrides_embedded_gpmd(self):
+        sidecar = self._create_raw_sidecar()
+        with mocked_processing() as (ins, rep, norm):
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds",
+                       return_value=0.2):
+                result = prepare(self.source, motion=sidecar)
+        self.assertEqual(result["mode"], "sidecar_gcsv")
+        rep.assert_not_called()
+
+    def test_raw_reuse_checks_sidecar_checksum(self):
+        sidecar = self._create_raw_sidecar()
+        with mocked_processing() as (ins, rep, norm):
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds",
+                       return_value=0.2):
+                prepare(self.source, motion=sidecar)
+            self.assertEqual(prepare(self.source, motion=sidecar, reuse=True)["status"], "reused")
+            sidecar.write_text(sidecar.read_text().replace("11,12,13", "11,12,14"),
+                               encoding="utf-8")
+            with self.assertRaisesRegex(PrepareError, "source GCSV"):
+                prepare(self.source, motion=sidecar, reuse=True)
+
+    def test_legacy_v1_package_can_be_reused_and_overwritten(self):
+        with mocked_processing() as (ins, rep, norm):
+            prepare(self.source)
+            path = self.output_dir / "manifest.json"
+            content = json.loads(path.read_text())
+            content["version"] = 1
+            del content["motion_input"]
+            path.write_text(json.dumps(content), encoding="utf-8")
+            self.assertEqual(prepare(self.source, reuse=True)["status"], "reused")
+            self.assertEqual(prepare(self.source, overwrite=True)["status"], "updated")
+
+    def test_malformed_raw_gcsv_fails_without_touching_source(self):
+        sidecar = self._create_raw_sidecar()
+        sidecar.write_text(sidecar.read_text().replace("1,12,13", "0,12,13"),
+                           encoding="utf-8")
+        with mocked_processing() as (ins, rep, norm):
+            with self.assertRaisesRegex(Exception, "Non-increasing"):
+                prepare(self.source, motion=sidecar)
+        self.assertEqual(self.source.read_bytes(), self.original_bytes)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_v2_manifest_missing_sidecar_fingerprint_is_rejected(self):
+        sidecar = self._create_raw_sidecar()
+        with mocked_processing():
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds",
+                       return_value=0.2):
+                prepare(self.source, motion=sidecar)
+            manifest_path = self.output_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            del manifest["motion_input"]["file"]["sha256"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(PrepareError, "invalid sidecar fingerprint"):
+                prepare(self.source, reuse=True, motion=sidecar)
+            with self.assertRaisesRegex(PrepareError, "invalid sidecar fingerprint"):
+                prepare(self.source, overwrite=True, motion=sidecar)
+
+    def test_raw_render_suffix_autodiscovery_and_reuse(self):
+        rendered = self.folder / "261111_161432_VIDEO_24mm_BT.709_BT709.mov"
+        rendered.write_bytes(b"synthetic rendered clip")
+        sidecar = self._create_raw_sidecar(name="261111_161432_VIDEO_24mm.gcsv")
+        with mocked_processing() as (ins, rep, norm):
+            ins.side_effect = None
+            ins.return_value = fake_inspect(rendered)
+            ins.return_value["imu"] = {"status": "missing"}
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds",
+                       return_value=0.2):
+                created = prepare(rendered)
+            self.assertEqual(created["mode"], "sidecar_gcsv")
+            self.assertEqual(prepare(rendered, reuse=True)["status"], "reused")
+        rep.assert_not_called()
+        self.assertEqual(
+            (self.folder / (rendered.stem + "_prepared") / (rendered.stem + "_motion.gcsv")).read_bytes(),
+            sidecar.read_bytes(),
+        )
+
+    def test_raw_copy_failure_keeps_old_package(self):
+        sidecar = self._create_raw_sidecar()
+        with mocked_processing() as (ins, rep, norm):
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds", return_value=0.2):
+                prepare(self.source, motion=sidecar)
+            old = (self.output_dir / "sample_motion.gcsv").read_bytes()
+            with patch("motioncam_gpmf_repair.prepare.shutil.copyfile",
+                       side_effect=OSError("injected copy failure")):
+                with self.assertRaisesRegex(OSError, "injected copy failure"):
+                    prepare(self.source, motion=sidecar, overwrite=True)
+            self.assertEqual((self.output_dir / "sample_motion.gcsv").read_bytes(), old)
+            self.assertEqual(sidecar.read_bytes(), old)
 
     def test_invalid_crop_and_output_directory_rejected(self):
         with mocked_processing():
