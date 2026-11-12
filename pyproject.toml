@@ -21,6 +21,7 @@ classifiers = [
 
 [project.scripts]
 motioncam-gpmf-repair = "motioncam_gpmf_repair.cli:main"
+motioncam-gpmf-dump = "motioncam_gpmf_repair.diagnostics:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
