@@ -91,7 +91,7 @@ class GpmfTests(unittest.TestCase):
         first = parsed.accel[0]
         extra = type(first)(first.timestamp_us, first.scale, ((999, 999, 999),) + first.samples)
         modified = type(parsed)(parsed.gyro, (extra,) + parsed.accel[1:])
-        with self.assertRaisesRegex(RepairError, "Mismatched sensor sample counts"):
+        with self.assertRaisesRegex(RepairError, "sample rates disagree"):
             analyze(Path("sample.mov"), modified)
         report = analyze(Path("sample.mov"), modified, gyro_only=True)
         self.assertEqual(report.samples, 6)
@@ -113,7 +113,7 @@ class GpmfTests(unittest.TestCase):
         last = parsed.gyro[-1]
         extra = type(last)(last.timestamp_us, last.scale, last.samples + ((7, 8, 9),))
         modified = type(parsed)(parsed.gyro[:-1] + (extra,), parsed.accel)
-        with self.assertRaisesRegex(RepairError, "Mismatched sensor sample counts"):
+        with self.assertRaisesRegex(RepairError, "outside the accelerometer timeline"):
             analyze(Path("sample.mov"), modified)
         report = analyze(Path("sample.mov"), modified, gyro_only=True)
         self.assertEqual(report.samples, 7)
