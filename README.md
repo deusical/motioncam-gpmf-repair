@@ -72,6 +72,16 @@ python .\repair_motioncam_gpmf.py inspect "C:\path\clip.mov" --json --output "C:
 After installing the package, use `motioncam-gpmf-inspect` or
 `motioncam-gpmf-repair inspect` with the same options.
 
+The report now displays an **automated PASS / WARNING / FAIL screening result**,
+plus independent gyro/accel clock checks, GPMF metadata-packet PTS versus
+`STMP`, and (when the MOV/MP4 is available) video-frame PTS cadence and
+metadata-to-video packet PTS proximity. PASS requires compatible sensor
+clocks and at least three Gyroflow sync points spanning 30 seconds with an
+offset range no greater than 25% of a video frame. This is an explicitly
+provisional heuristic, **not** a guarantee of correct stabilization.
+**Visual verification is always required.** See [validation methodology](docs/VALIDATION.md)
+for the limits and precise criteria.
+
 The JSON report contains aggregate statistics, filenames (not full paths),
 lens and orientation metadata, and Gyroflow sync-point offsets. It does
 **not** copy private raw IMU samples or embedded Gyroflow motion caches.
