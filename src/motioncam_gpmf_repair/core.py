@@ -1,6 +1,6 @@
 """Parse MotionCam GPMF sensor samples and reconstruct an experimental GCSV timeline.
 
-Validated with one Vivo X100 Ultra MotionCam main-camera 4K/30 MOV.
+This implementation uses reconstructed sample timing and a fixed axis mapping.
 This is not a general GPMF decoder or a fix for dropped/variable-rate samples.
 """
 
@@ -196,7 +196,7 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
             ("id", f"{source.stem}_MotionCam_retimed"),
             ("orientation", "XYZ"),
             ("vendor", "MotionCam"),
-            ("note", "Experimental reconstructed GPMF timestamps; axes validated for Vivo X100 Ultra MotionCam main camera"),
+            ("note", "Experimental reconstructed GPMF timestamps and axis mapping; verify synchronization"),
             ("videofilename", source.name),
             ("tscale", "0.000001"),
             ("gscale", str(1.0 / scale_g)),
