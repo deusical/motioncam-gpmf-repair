@@ -137,8 +137,9 @@ class GpmfTests(unittest.TestCase):
         last = parsed.gyro[-1]
         extra = type(last)(last.timestamp_us, last.scale, last.samples + ((7, 8, 9),))
         modified = type(parsed)(parsed.gyro[:-1] + (extra,), parsed.accel)
-        with self.assertRaisesRegex(RepairError, "outside the accelerometer timeline"):
-            analyze(Path("sample.mov"), modified)
+        aligned = analyze(Path("sample.mov"), modified)
+        self.assertEqual(aligned.alignment, "interpolated")
+        self.assertAlmostEqual(aligned.accel_clamp_end_us, 3000)
         report = analyze(Path("sample.mov"), modified, gyro_only=True)
         self.assertEqual(report.samples, 7)
         self.assertEqual(report.accel_samples, 6)
