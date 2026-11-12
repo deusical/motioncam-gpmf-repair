@@ -79,6 +79,6 @@ python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-CI runs synthetic fixtures on Linux and Windows. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) for development and privacy guidance.
+CI runs the synthetic tests in one Linux job when code or workflow files change; documentation-only commits skip CI. A manual run is also available. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) for development and privacy guidance.
 
 See [troubleshooting and bug-report guidance](docs/BUG_REPORT.md) for reporting synchronization problems. This project is licensed under the [MIT License](LICENSE). MotionCam, Vivo, GoPro GPMF, and Gyroflow are referenced for interoperability; this independent project is not affiliated with or endorsed by them.
