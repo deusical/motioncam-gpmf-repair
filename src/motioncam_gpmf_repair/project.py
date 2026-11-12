@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from .core import RepairError, _run
 from .prepare import PrepareError, _fingerprint, _read_known_package
 from .sidecar import SidecarError, inspect_gcsv, sha256_file
 
@@ -173,6 +174,29 @@ def _selected_files(video: Path) -> tuple[Path, Path, dict, dict]:
     return working_video, motion, manifest, inspection
 
 
+def _selected_video_info(original: Path, selected: Path, inspected: dict) -> dict | None:
+    """Compare explicit reference calibration against the video Gyroflow will open.
+
+    When prepare created a normalized copy, the original recording may be
+    padded (e.g. 3840x2176 -> 3840x2160), so its inspection dimensions
+    would incorrectly reject a compatible profile.
+    """
+    if selected == original:
+        return inspected.get("video")
+    try:
+        probe = json.loads(_run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "json",
+            str(selected),
+        ]))
+        info = (probe.get("streams") or [])[0]
+        if not isinstance(info.get("width"), int) or not isinstance(info.get("height"), int):
+            raise ProjectError("Normalized video dimensions are not available")
+        return info
+    except (RepairError, ValueError, IndexError, KeyError, OSError) as exc:
+        raise ProjectError("Cannot inspect normalized video dimensions") from exc
+
+
 def _binary(binary: str | None) -> str | None:
     if binary:
         path = Path(binary).expanduser()
@@ -256,7 +280,9 @@ def build_project(
     preset_path = None
     if reference is not None:
         reference = reference.expanduser().resolve()
-        preset_content = _reference_preset(reference, inspection.get("video"))
+        preset_content = _reference_preset(
+            reference, _selected_video_info(video, selected_video, inspection)
+        )
         lens_name = preset_content["calibration_data"]["name"]
     if preset is not None:
         preset_path = preset.expanduser().resolve()
