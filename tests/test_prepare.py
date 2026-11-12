@@ -314,6 +314,40 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), self.original_bytes)
         self.assertFalse(self.output_dir.exists())
 
+    def test_v2_manifest_missing_sidecar_fingerprint_is_rejected(self):
+        sidecar = self._create_raw_sidecar()
+        with mocked_processing():
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds",
+                       return_value=0.2):
+                prepare(self.source, motion=sidecar)
+            manifest_path = self.output_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            del manifest["motion_input"]["file"]["sha256"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(PrepareError, "invalid sidecar fingerprint"):
+                prepare(self.source, reuse=True, motion=sidecar)
+            with self.assertRaisesRegex(PrepareError, "invalid sidecar fingerprint"):
+                prepare(self.source, overwrite=True, motion=sidecar)
+
+    def test_raw_render_suffix_autodiscovery_and_reuse(self):
+        rendered = self.folder / "261111_161432_VIDEO_24mm_BT.709_BT709.mov"
+        rendered.write_bytes(b"synthetic rendered clip")
+        sidecar = self._create_raw_sidecar(name="261111_161432_VIDEO_24mm.gcsv")
+        with mocked_processing() as (ins, rep, norm):
+            ins.side_effect = None
+            ins.return_value = fake_inspect(rendered)
+            ins.return_value["imu"] = {"status": "missing"}
+            with patch("motioncam_gpmf_repair.prepare._video_duration_seconds",
+                       return_value=0.2):
+                created = prepare(rendered)
+            self.assertEqual(created["mode"], "sidecar_gcsv")
+            self.assertEqual(prepare(rendered, reuse=True)["status"], "reused")
+        rep.assert_not_called()
+        self.assertEqual(
+            (self.folder / (rendered.stem + "_prepared") / (rendered.stem + "_motion.gcsv")).read_bytes(),
+            sidecar.read_bytes(),
+        )
+
     def test_raw_copy_failure_keeps_old_package(self):
         sidecar = self._create_raw_sidecar()
         with mocked_processing() as (ins, rep, norm):
