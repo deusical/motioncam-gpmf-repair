@@ -76,8 +76,8 @@ class GpmfTests(unittest.TestCase):
                 contents = list(csv.reader(f))
             self.assertFalse(any(row and row[0] == "orientation" for row in contents))
             rows = contents[contents.index(["t", "gx", "gy", "gz", "ax", "ay", "az"]) + 1:]
-            self.assertEqual(rows[0], ["1000", "1", "2", "3", "10", "20", "30"])
-            self.assertEqual(rows[-1], ["16000", "6", "7", "8", "15", "25", "35"])
+            self.assertEqual(rows[0], ["1000", "1", "2", "3", "10.0", "20.0", "30.0"])
+            self.assertEqual(rows[-1], ["16000", "6", "7", "8", "15.0", "25.0", "35.0"])
             self.assertEqual(len(rows), 6)
 
     def test_orientation_metadata_is_optional_and_never_changes_sensor_axes(self):
@@ -91,7 +91,90 @@ class GpmfTests(unittest.TestCase):
                 rows = list(csv.reader(f))
             self.assertIn(["orientation", "yXz"], rows)
             index = rows.index(["t", "gx", "gy", "gz", "ax", "ay", "az"])
-            self.assertEqual(rows[index + 1], ["1000", "1", "2", "3", "10", "20", "30"])
+            self.assertEqual(rows[index + 1], ["1000", "1", "2", "3", "10.0", "20.0", "30.0"])
+
+    def test_equal_count_phase_offset_is_interpolated_not_index_paired(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch, Sensors = type(parsed.gyro[0]), type(parsed)
+        gyro = (
+            Batch(2500, 1000, ((1, 2, 3), (2, 3, 4), (3, 4, 5))),
+            Batch(10000, 1000, ((4, 5, 6), (5, 6, 7), (6, 7, 8))),
+        )
+        # Same six samples, but accel started 1000 us earlier.
+        accel_values = [(10 * k, 20 * k, 30 * k) for k in range(6)]
+        accel = (
+            Batch(1500, 1000, tuple(accel_values[:3])),
+            Batch(9000, 1000, tuple(accel_values[3:])),
+        )
+        report = analyze(Path("sample.mov"), Sensors(gyro, accel))
+        self.assertEqual(report.alignment, "interpolated")
+        self.assertEqual(report.samples, report.accel_samples)
+        self.assertAlmostEqual(report.accel_interval_us, 2500)
+        self.assertAlmostEqual(report.accel_clamp_end_us, 1000)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "equal_count.gcsv"
+            write_gcsv(Path("sample.mov"), path, Sensors(gyro, accel), report)
+            with path.open(encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+            samples = rows[rows.index(["t", "gx", "gy", "gz", "ax", "ay", "az"]) + 1:]
+            self.assertEqual(len(samples), 6)
+            self.assertEqual(samples[0], ["2500", "1", "2", "3", "4.0", "8.0", "12.0"])
+            self.assertEqual(samples[-1], ["15000", "6", "7", "8", "50.0", "100.0", "150.0"])
+
+    def test_equal_count_clock_disagreement_fails_closed(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch, Sensors = type(parsed.gyro[0]), type(parsed)
+        gyro = (
+            Batch(2500, 1000, ((1, 2, 3),) * 3),
+            Batch(10000, 1000, ((1, 2, 3),) * 3),
+        )
+        accel = (
+            Batch(1500, 1000, ((1, 2, 3),) * 3),
+            Batch(10500, 1000, ((1, 2, 3),) * 3),
+        )
+        with self.assertRaisesRegex(RepairError, "sample rates disagree"):
+            analyze(Path("sample.mov"), Sensors(gyro, accel))
+
+    def test_equal_count_edge_gap_exceeding_period_is_rejected(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch, Sensors = type(parsed.gyro[0]), type(parsed)
+        gyro = (
+            Batch(1000, 1000, ((1, 2, 3),) * 3),
+            Batch(8500, 1000, ((1, 2, 3),) * 3),
+        )
+        accel = (
+            Batch(5000, 1000, ((1, 2, 3),) * 3),
+            Batch(12500, 1000, ((1, 2, 3),) * 3),
+        )
+        with self.assertRaisesRegex(RepairError, "more than one sample interval"):
+            analyze(Path("sample.mov"), Sensors(gyro, accel))
+
+    def test_non_monotonic_batch_timestamps_are_rejected(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch, Sensors = type(parsed.gyro[0]), type(parsed)
+        gyro = (
+            Batch(10000, 1000, ((1, 2, 3),) * 3),
+            Batch(9000, 1000, ((1, 2, 3),) * 3),
+        )
+        with self.assertRaisesRegex(RepairError, "Non-increasing gyro"):
+            analyze(Path("sample.mov"), Sensors(gyro, parsed.accel))
+
+    def test_long_term_clock_discontinuity_is_rejected(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        Batch, Sensors = type(parsed.gyro[0]), type(parsed)
+        gyro = tuple(Batch(
+            1000 + min(i, 12) * 5000 + max(0, i - 12) * 6000,
+            1000, ((1, 2, 3), (4, 5, 6)),
+        ) for i in range(24))
+        with self.assertRaisesRegex(RepairError, "Inconsistent gyro sampling rate"):
+            analyze(Path("sample.mov"), Sensors(gyro, parsed.accel))
+
+    def test_gyro_only_does_not_require_accelerometer(self):
+        parsed = parse_sensors([len(fixture_packet())], fixture_packet())
+        report = analyze(Path("sample.mov"), type(parsed)(parsed.gyro, ()), gyro_only=True)
+        self.assertEqual(report.alignment, "gyro-only")
+        self.assertEqual(report.accel_samples, 0)
+        self.assertIsNone(report.accel_interval_us)
 
     def test_invalid_orientations_are_rejected(self):
         for axes in ("XXZ", "YX", "ABZ", "XYZx"):
