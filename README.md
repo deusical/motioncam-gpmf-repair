@@ -52,6 +52,37 @@ This writes `clip_imu_diagnostic.json.gz` alongside the MOV. The command also wo
 
 If automatic alignment cannot establish compatible sensor clocks, use the diagnostic to investigate. To intentionally omit acceleration, run `python .\\repair_motioncam_gpmf.py "C:\\path\\clip.mov" --gyro-only`. This explicit fallback does not attempt to align the streams.
 
+## Optional lossless video-height normalization
+
+Some camera encoders pad the displayed frame dimensions. This separate utility
+uses HEVC conformance-window metadata to hide **explicitly specified** padding
+without re-encoding the image. No device, lens, or intended aspect ratio is
+inferred from the filename. The original recording is never overwritten.
+
+For example, for HEVC footage known to have 16 unwanted rows **at the bottom**:
+
+
+~~~powershell
+python .\normalize_motioncam_video.py "C:\path\clip.mov" --target-height 2160 --dry-run
+python .\normalize_motioncam_video.py "C:\path\clip.mov" --target-height 2160
+# Or give the intended image aspect ratio explicitly:
+python .\normalize_motioncam_video.py "C:\path\clip.mov" --aspect 16:9
+~~~
+
+This writes a new file named like `clip_3840x2160.mov`. It supports
+only HEVC in MOV/MP4, refuses existing coded/display-size differences,
+limits the number of removed rows, and checks output dimensions, streams,
+durations, and frame counts. By default, all rows are cropped **from the bottom**;
+use `--crop-top N` only when the image really contains top padding.
+For best lens-profile compatibility, normalize **before** optical calibration
+or stabilization.
+
+This remuxes recognized streams with FFmpeg (`-map 0 -c copy`), preserving their
+encoded media packets, but proprietary or unrecognized container atoms are not
+guaranteed to survive a remux. Keep your source file. Use
+`motioncam-video-normalize` instead of the script after installing the package.
+The video-height tool does not create or fix gyro metadata.
+
 ## How it works
 
 1. `ffprobe` finds the embedded `gpmd` track and reads packet boundaries; `ffmpeg` extracts the compressed-container-free GPMF payload.
