@@ -1,6 +1,7 @@
 """Parse MotionCam GPMF sensor samples and reconstruct an experimental GCSV timeline.
 
-This implementation uses reconstructed sample timing and a fixed axis mapping.
+This implementation reconstructs sample timing and preserves native GPMF axis order.
+Camera-to-IMU orientation must be determined separately (e.g. in Gyroflow).
 This is not a general GPMF decoder or a fix for dropped/variable-rate samples.
 """
 
@@ -242,9 +243,20 @@ def analyze(source: Path, sensors: SensorData, *, gyro_only: bool = False) -> Re
     )
 
 
+def validate_imu_orientation(value: str | None) -> None:
+    """Validate optional Gyroflow axis mapping without applying it to samples."""
+    if value is not None and (len(value) != 3 or set(value.upper()) != {"X", "Y", "Z"}):
+        raise RepairError("IMU orientation must be exactly one of each X, Y, Z (case indicates axis inversion)")
+
+
 def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairReport, *,
-               gyro_only: bool = False) -> None:
-    """Write a uniform-timeline GCSV, omitting unpairable accelerometer data."""
+               gyro_only: bool = False, imu_orientation: str | None = None) -> None:
+    """Write original GPMF XYZ values with reconstructed timestamps.
+
+    An optional orientation is saved as Gyroflow metadata. It does not modify
+    the measurements, so Gyroflow applies that mapping exactly once.
+    """
+    validate_imu_orientation(imu_orientation)
     scale_g = _sensor_scale(sensors.gyro, "GYRO")
     include_accel = not gyro_only and report.alignment != "gyro-only"
     scale_a = _sensor_scale(sensors.accel, "ACCL") if include_accel else None
@@ -254,13 +266,14 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
         metadata = [
             ("version", "1.3"),
             ("id", f"{source.stem}_MotionCam_retimed"),
-            ("orientation", "XYZ"),
             ("vendor", "MotionCam"),
-            ("note", "Experimental reconstructed GPMF timestamps and axis mapping; verify synchronization"),
+            ("note", "Experimental reconstructed GPMF timing; raw sensor axes preserved; verify orientation and sync"),
             ("videofilename", source.name),
             ("tscale", "0.000001"),
             ("gscale", str(1.0 / scale_g)),
         ]
+        if imu_orientation is not None:
+            metadata.append(("orientation", imu_orientation))
         if include_accel:
             metadata.append(("ascale", str(1.0 / (scale_a * GRAVITY))))
         metadata.append(("t", "gx", "gy", "gz", "ax", "ay", "az") if include_accel else ("t", "gx", "gy", "gz"))
@@ -287,22 +300,24 @@ def write_gcsv(source: Path, dest: Path, sensors: SensorData, report: RepairRepo
                     for axis in range(3)
                 )
                 writer.writerow([
-                    round(time_us), -gy, -gx, -gz,
-                    round(-ay, 6), round(-ax, 6), round(-az, 6),
+                    round(time_us), gx, gy, gz,
+                    round(ax, 6), round(ay, 6), round(az, 6),
                 ])
         elif include_accel:
             accel_samples = (xyz for batch in sensors.accel for xyz in batch.samples)
             for idx, (g, a) in enumerate(zip(gyro_samples, accel_samples)):
                 gx, gy, gz = g
                 ax, ay, az = a
-                writer.writerow([round(first + idx * report.interval_us), -gy, -gx, -gz, -ay, -ax, -az])
+                writer.writerow([round(first + idx * report.interval_us), gx, gy, gz, ax, ay, az])
         else:
             for idx, (gx, gy, gz) in enumerate(gyro_samples):
-                writer.writerow([round(first + idx * report.interval_us), -gy, -gx, -gz])
+                writer.writerow([round(first + idx * report.interval_us), gx, gy, gz])
 
 
 def repair(source: Path, destination: Path | None = None, *, overwrite: bool = False,
-           dry_run: bool = False, gyro_only: bool = False) -> RepairReport:
+           dry_run: bool = False, gyro_only: bool = False,
+           imu_orientation: str | None = None) -> RepairReport:
+    validate_imu_orientation(imu_orientation)
     if not source.is_file():
         raise RepairError(f"File does not exist: {source}")
     destination = destination or source.with_name(source.stem + "_retimed.gcsv")
@@ -324,7 +339,8 @@ def repair(source: Path, destination: Path | None = None, *, overwrite: bool = F
                 dir=destination.parent, prefix=".motioncam-", suffix=".gcsv", delete=False
             ) as tmp:
                 temp_name = Path(tmp.name)
-            write_gcsv(source, temp_name, sensors, report, gyro_only=gyro_only)
+            write_gcsv(source, temp_name, sensors, report, gyro_only=gyro_only,
+                       imu_orientation=imu_orientation)
             os.replace(temp_name, destination)
         finally:
             if temp_name is not None:
