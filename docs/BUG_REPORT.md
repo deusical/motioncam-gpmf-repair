@@ -1,31 +1,34 @@
-# Upstream investigation: MotionCam MOV GPMF gyro sync
+# Troubleshooting and bug reports
 
-## Reproduction (one confirmed recording)
+This page explains how to investigate MotionCam GPMF synchronization problems and prepare a useful report without sharing private recordings.
 
-- Device: Vivo X100 Ultra, main camera (~24 mm equivalent)
-- Video: MotionCam 3840×2160 30 fps HEVC MOV, OIS/EIS disabled
-- Stabilizer: Gyroflow 1.7.0, custom lens profile
-- Embedded GPMF sensor log: ~25,033 GYRO and ACCL samples in ~60 seconds (~417.7 Hz)
-- Embedded sync guesses differed substantially: approximately −905 to +644 ms, resulting in poor stabilization
-- Reconstructed external GCSV, with **both** continuous sample timing and validated axis remapping, gave consistent offsets of approximately −7 to −11 ms and successful stabilization
+## When to use this tool
 
-## GPMF timeline observation
+Gyroflow may have difficulty aligning video motion with embedded sensor data. This converter reconstructs a uniform sample timeline and writes a GCSV motion log for testing as an alternative to the embedded track.
 
-One packet with `STMP=68,713 µs` contains 26 gyro samples. The following packet advertises `STMP=102,225 µs`, an advance of ~33.5 ms, while 26 samples at the inferred 417.7 Hz rate occupy ~62 ms. Sequential sensor values remain continuous. This is inconsistent with interpreting each `STMP` as the first sample timestamp for each non-overlapping sample batch.
+Possible symptoms include inconsistent synchronization offsets, unstable compensation, or a mismatch between visible camera movement and gyroscope traces. These symptoms are not sufficient to identify the underlying cause.
 
-## Unknowns
+## Basic checks
 
-- Whether the MOV muxer emits inconsistent GPMF STMP timestamps, or Gyroflow's parser interprets MotionCam's metadata differently than intended
-- Whether the timestamp issue **alone** is sufficient to break stabilization (the working reconstruction also remaps axes)
-- Whether this happens on other devices, builds, or video modes
+1. Confirm that the MOV contains an embedded `gpmd` data stream and can be opened in Gyroflow.
+2. Check the correct lens profile, sensor orientation, and synchronization method.
+3. Run the converter and load the resulting GCSV as the motion-data source.
+4. Recalculate synchronization points, compare the result against the original, and verify stabilization visually.
+5. If synchronization remains inconsistent, do not assume the reconstructed timeline is accurate.
 
-## Useful attachments for a bug report
+## What to include in a report
 
-- Original short MOV retaining its `gpmd` data track, with nonprivate subject matter
-- Exact MotionCam build number, Gyroflow version, lens/crop settings
-- Matching corrected `.gcsv` and before/after sync-point screenshots
-- FFprobe stream/packet details and sample-count discrepancy
+- Device and camera/lens model, operating system, MotionCam and Gyroflow versions
+- Container format, recording mode, and FFmpeg version
+- Whether the MOV includes a `gpmd` track
+- The command used, any errors, and the converter's diagnostic summary
+- Whether the original and reconstructed motion data behave differently
+- Synthetic or redacted GPMF packet summaries, if relevant, including `STMP` and sensor sample counts
 
-Never attach private footage, locations, or identifying information without inspecting it first.
+Do **not** post private videos, raw gyro logs, identifying locations, or unreviewed metadata in public issues. When practical, create a short, non-sensitive reproduction clip.
+
+## Scope of investigation
+
+Unexpected results may originate from metadata generation, timestamp interpretation, dropped samples, variable sampling rates, coordinate mapping, or synchronization settings. The converter modifies both timing and coordinate mapping; an improved result does not by itself isolate the cause.
 
 Reference: [GoPro GPMF common header](https://github.com/gopro/gpmf-parser/blob/main/GPMF_common.h).
